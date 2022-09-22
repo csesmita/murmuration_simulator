@@ -28,7 +28,7 @@ import random
 from queue import PriorityQueue
 import bitmap
 import copy
-import collections
+from collections import deque, defaultdict
 from itertools import count
 
 class TaskDurationDistributions:
@@ -60,7 +60,7 @@ class Job(object):
         Job.job_count += 1
         self.completed_tasks_count = 0
         self.end_time = self.start_time
-        self.unscheduled_tasks = collections.deque()
+        self.unscheduled_tasks = deque()
         self.off_mean_bottom = off_mean_bottom
         self.off_mean_top = off_mean_top
 
@@ -286,14 +286,17 @@ class ProbeEvent(Event):
 
 #####################################################################################################################
 #####################################################################################################################
-
 class ClusterStatusKeeper():
-    def __init__(self):
+    def __init__(self, num_workers, scheduler_indices):
         self.worker_queues = {}
+        self.scheduler_view = {}
         self.btmap = bitmap.BitMap(TOTAL_WORKERS)
         for i in range(0, TOTAL_WORKERS):
            self.worker_queues[i] = 0
-
+        for i in scheduler_indices:
+            self.scheduler_view[i] = defaultdict(int)
+            for j in range(num_workers):
+                self.scheduler_view[i][j] = 0
 
     def get_queue_status(self):
         return self.worker_queues
@@ -313,6 +316,62 @@ class ClusterStatusKeeper():
                     self.btmap.flip(worker) 
             assert queue >= 0, (" offending value for queue: %r %i " % (queue,worker))
             self.worker_queues[worker] = queue
+
+    def update_scheduler_view(self, origin_scheduler_index, rx_scheduler_index, core_id,current_time, history_time, duration):
+        if origin_scheduler_index == rx_scheduler_index:
+            return
+        availability_at_cores = self.scheduler_view[rx_scheduler_index]
+        last_updated_time = 0
+        core_availability = 0
+        if core_id in availability_at_cores.keys():
+            core_availability = availability_at_cores[core_id]
+        #Update whatever is received from other schedulers and earlier placements by self.
+        #This is the complete truth.
+        if history_time > core_availability:
+            #Placement happened after previous tasks had completed.
+            #This advancement cannot be reversed.
+            #All durations get added beyond this hole.
+            core_availability = history_time
+        core_availability += duration
+        availability_at_cores[core_id] = core_availability
+
+    def get_machine_with_shortest_wait(self, scheduler_index, current_time):
+        current_time = int(ceil(current_time))
+        availability_at_cores = self.scheduler_view[scheduler_index]
+        if len(availability_at_cores) == 0:
+            return 0, current_time
+        chosen_machine, best_fit_time = (sorted(availability_at_cores.items(), key=itemgetter(1)))[0]
+        if best_fit_time < current_time:
+            best_fit_time = current_time
+        return chosen_machine, best_fit_time
+
+
+    def update_worker_queues_free_time(self, core_id, start_time, end_time, current_time, scheduler_index):
+        current_time = int(ceil(current_time))
+
+        duration = end_time - start_time
+        updated_view = 0
+        availability_at_cores = self.scheduler_view[scheduler_index]
+        actual_start_at_worker = self.worker_queues[core_id] if self.worker_queues[core_id] > current_time else current_time
+        if core_id in availability_at_cores.keys():
+            updated_view = availability_at_cores[core_id]
+
+        if start_time > updated_view:
+            #Placement happened after previous tasks had completed.
+            #This advancement cannot be reversed.
+            #All durations get added beyond this hole.
+            updated_view = start_time
+        updated_view += duration
+        availability_at_cores[core_id] = updated_view
+
+        #Scheduler sees a longer queue at worker if it had jumped a hole in its view.
+        #if actual_start_at_worker < start_time:
+            #print "Actual start at worker", core_id,"is",actual_start_at_worker, "while scheduler predicted",start_time
+        #Update the actual worker's queue.
+        self.worker_queues[core_id] = actual_start_at_worker + duration
+        has_collision = False if start_time == actual_start_at_worker else True
+        return actual_start_at_worker, has_collision
+
 
 #####################################################################################################################
 #####################################################################################################################
@@ -810,7 +869,7 @@ class Simulation(object):
         self.jobs_completed = 0
         self.scheduled_last_job = False
 
-        self.cluster_status_keeper = ClusterStatusKeeper()
+        self.cluster_status_keeper = ClusterStatusKeeper(len(self.workers), self.scheduler_indices)
         self.stealing_allowed = stealing_allowed
         self.SCHEDULE_BIG_CENTRALIZED = SCHEDULE_BIG_CENTRALIZED
         self.WORKLOAD_FILE = WORKLOAD_FILE
@@ -947,7 +1006,6 @@ class Simulation(object):
 
     #Simulation class
     def find_machines_murmuration(self, job, current_time, scheduler_index):
-        global time_elapsed_in_dc
         global num_collisions
         best_fit_for_tasks = defaultdict(int)
         for task_index in range(job.num_tasks):
@@ -1248,8 +1306,8 @@ class Simulation(object):
 
         # Calculate utilizations of worker machines in DC
         time_elapsed_in_dc = current_time - start_time_in_dc
-        print("Total time elapsed in the DC is", time_elapsed_in_dc, "s")
         utilization = 100 * (float(total_busyness) / float(time_elapsed_in_dc * len(self.workers)))
+        print("Total time elapsed in the DC is", time_elapsed_in_dc, "s and utilization is", utilization)
 
 #####################################################################################################################
 #globals
