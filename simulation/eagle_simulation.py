@@ -25,10 +25,11 @@ import time
 import logging
 import math
 import random
-import Queue
+from queue import PriorityQueue
 import bitmap
 import copy
 import collections
+from itertools import count
 
 class TaskDurationDistributions:
     CONSTANT, MEAN, FROM_FILE  = range(3)
@@ -41,9 +42,10 @@ class Job(object):
 
     def __init__(self, task_distribution, line, estimate_distribution, off_mean_bottom, off_mean_top):
         global job_start_tstamps
+        global job_count
 
         job_args                    = (line.split('\n'))[0].split()
-        self.start_time             = float(job_args[0])
+        self.start_time             = float(job_args[0]) / SPEEDUP
         self.num_tasks              = int(job_args[1])
         mean_task_duration          = int(float(job_args[2]))
 
@@ -150,7 +152,7 @@ class Event(object):
 #####################################################################################################################
 #####################################################################################################################
 
-class JobArrival(Event, file):
+class JobArrival(Event):
 
     def __init__(self, simulation, task_distribution, job, jobs_file):
         self.simulation = simulation
@@ -166,7 +168,7 @@ class JobArrival(Event, file):
 
         btmap = None
         if not long_job:
-            print current_time, ": Short Job arrived!!", self.job.id, " num tasks ", self.job.num_tasks, " estimated_duration ", self.job.estimated_task_duration
+            print(current_time, ": Short Job arrived!!", self.job.id, " num tasks ", self.job.num_tasks, " estimated_duration ", self.job.estimated_task_duration)
 
             
             rnd_worker_in_big_partition = random.randint(self.simulation.index_first_worker_of_big_partition, len(self.simulation.workers)-1)
@@ -180,7 +182,7 @@ class JobArrival(Event, file):
             worker_indices = self.simulation.find_workers_random(PROBE_RATIO, self.job.num_tasks, possible_worker_indices,MIN_NR_PROBES)
 
         else:
-            print current_time, ":   Big Job arrived!!", self.job.id, " num tasks ", self.job.num_tasks, " estimated_duration ", self.job.estimated_task_duration
+            print(current_time, ":   Big Job arrived!!", self.job.id, " num tasks ", self.job.num_tasks, " estimated_duration ", self.job.estimated_task_duration)
             btmap = self.simulation.cluster_status_keeper.get_btmap()
 
             if (SYSTEM_SIMULATED == "DLWL"):
@@ -238,7 +240,7 @@ class PeriodicTimerEvent(Event):
         if(len(self.simulation.small_not_big_partition_workers)!=0):
             small_not_big_load        = str(int(10000*(1-self.simulation.free_slots_small_not_big_partition*1.0/len(self.simulation.small_not_big_partition_workers)))/100.0)
 
-        print >> load_file,"total_load: " + total_load + " small_load: " + small_load + " big_load: " + big_load + " small_not_big_load: " + small_not_big_load+" current_time: " + str(current_time) 
+        print("total_load: " + total_load + " small_load: " + small_load + " big_load: " + big_load + " small_not_big_load: " + small_not_big_load+" current_time: " + str(current_time), file=load_file)
 
         if(not self.simulation.event_queue.empty()):
             new_events.append((current_time + MONITOR_INTERVAL,self))
@@ -399,7 +401,8 @@ class Worker(object):
 
         self.btmap = None
         self.btmap_tstamp = -1
-
+        self.busy_time = 0.0
+        self.num_tasks = 0
 
     #Worker class
     def add_probe(self, job_id, task_length, job_type_for_scheduling, current_time, btmap, handle_stealing):
@@ -456,7 +459,7 @@ class Worker(object):
             ctr_it += 1
 
         if(from_worker!=-1 and len(new_probes)!= 0):
-            print current_time, ": Worker ", self.id," Stealing: ", len(new_probes), " from: ",from_worker, " attempts: ",ctr_it
+            print(current_time, ": Worker ", self.id," Stealing: ", len(new_probes), " from: ",from_worker, " attempts: ",ctr_it)
             from_worker_obj=self.simulation.workers[from_worker]
             if(from_worker_obj.in_big and self.in_big):
                 stats.STATS_TOTAL_STOLEN_B_FROM_B_PROBES          += len(new_probes)
@@ -470,7 +473,7 @@ class Worker(object):
             stats.STATS_TOTAL_STOLEN_PROBES          += len(new_probes)
             stats.STATS_SUCCESSFUL_STEAL_ATTEMPTS   += 1
         else:
-            print current_time, ": Worker ", self.id," failed to steal. attempts: ",ctr_it
+            print(current_time, ": Worker ", self.id," failed to steal. attempts: ",ctr_it)
             stats.STATS_STEALING_MESSAGES += ctr_it
 
         for job_id, task_length, behind_big, cum, sticky, handle_steal in new_probes:
@@ -594,7 +597,7 @@ class Worker(object):
 
         if(SBP_ENABLED==True and was_successful and not job_bydef_big):
             if(self.queued_probes[pos][4]):
-            	stats.STATS_STICKY_EXECUTIONS += 1
+                stats.STATS_STICKY_EXECUTIONS += 1
                 if(self.in_big):
                     stats.STATS_STICKY_EXECUTIONS_IN_BP +=1
             self.queued_probes[pos][4] = True
@@ -756,22 +759,27 @@ class Simulation(object):
         TOTAL_WORKERS = int(nr_workers)
         self.total_free_slots = SLOTS_PER_WORKER * TOTAL_WORKERS
         self.jobs = {}
-        self.event_queue = Queue.PriorityQueue()
+        self.event_queue = PriorityQueue()
         self.workers = []
+        self.scheduler_indices = []
 
         self.index_last_worker_of_small_partition = int(SMALL_PARTITION*TOTAL_WORKERS*SLOTS_PER_WORKER/100)-1
         self.index_first_worker_of_big_partition  = int((100-BIG_PARTITION)*TOTAL_WORKERS*SLOTS_PER_WORKER/100)
 
         while len(self.workers) < TOTAL_WORKERS:
+            worker = Worker(self, SLOTS_PER_WORKER, len(self.workers),self.index_last_worker_of_small_partition,self.index_first_worker_of_big_partition)
             self.workers.append(Worker(self, SLOTS_PER_WORKER, len(self.workers),self.index_last_worker_of_small_partition,self.index_first_worker_of_big_partition))
+            if random.random() < RATIO_SCHEDULERS_TO_WORKERS:
+                self.scheduler_indices.append(worker.id)
+
         self.worker_indices = range(TOTAL_WORKERS)
         self.off_mean_bottom = off_mean_bottom
         self.off_mean_top = off_mean_top
         self.ESTIMATION = ESTIMATION
         self.shared_cluster_status = {}
 
-        print "self.index_last_worker_of_small_partition:         ", self.index_last_worker_of_small_partition
-        print "self.index_first_worker_of_big_partition:          ", self.index_first_worker_of_big_partition
+        print("self.index_last_worker_of_small_partition:         ", self.index_last_worker_of_small_partition)
+        print("self.index_first_worker_of_big_partition:          ", self.index_first_worker_of_big_partition)
 
         self.small_partition_workers_hash =  {}
         self.big_partition_workers_hash = {}
@@ -789,9 +797,9 @@ class Simulation(object):
         for node in self.small_not_big_partition_workers:
             self.small_not_big_partition_workers_hash[node] = 1
 
-        print "Size of self.small_partition_workers_hash:         ", len(self.small_partition_workers_hash)
-        print "Size of self.big_partition_workers_hash:           ", len(self.big_partition_workers_hash)
-        print "Size of self.small_not_big_partition_workers_hash: ", len(self.small_not_big_partition_workers_hash)
+        print("Size of self.small_partition_workers_hash:         ", len(self.small_partition_workers_hash))
+        print("Size of self.big_partition_workers_hash:           ", len(self.big_partition_workers_hash))
+        print("Size of self.small_not_big_partition_workers_hash: ", len(self.small_not_big_partition_workers_hash))
 
 
         self.free_slots_small_partition = len(self.small_partition_workers)
@@ -937,6 +945,28 @@ class Simulation(object):
         assert workers_needed == len(chosen_worker_indices)
         return chosen_worker_indices
 
+    #Simulation class
+    def find_machines_murmuration(self, job, current_time, scheduler_index):
+        global time_elapsed_in_dc
+        global num_collisions
+        best_fit_for_tasks = defaultdict(int)
+        for task_index in range(job.num_tasks):
+            duration = int(ceil(job.actual_task_duration[task_index]))
+            chosen_machine, best_fit_time = keeper.get_machine_with_shortest_wait(scheduler_index, current_time)
+            best_fit_for_tasks[chosen_machine] += duration
+            #Update est time at this machine and its cores
+            #print("Picked machine", chosen_machine," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_fit_time)
+            best_fit_time, has_collision = keeper.update_worker_queues_free_time(chosen_machine, best_fit_time, best_fit_time + duration, current_time, scheduler_index)
+            probe_params = [chosen_machine, job.id, task_index, current_time]
+            self.machines[chosen_machine].add_machine_probe(best_fit_time, probe_params)
+            if has_collision:
+                num_collisions += 1
+                job.has_collision = True
+                #print("adjusted to", best_fit_time)
+            #print("")
+        return best_fit_for_tasks
+
+
 
     #Simulation class
     def send_probes(self, job, current_time, worker_indices, btmap):
@@ -948,6 +978,8 @@ class Simulation(object):
             return self.send_probes_hawk(job, current_time, worker_indices, btmap)
         if SYSTEM_SIMULATED == "DLWL":
             return self.send_probes_hawk(job, current_time, worker_indices, btmap)
+        if SYSTEM_SIMULATED == "Murmuration":
+            return self.send_tasks_murmuration(job, current_time, worker_indices)
 
 
     #Simulation class
@@ -1099,12 +1131,12 @@ class Simulation(object):
         events = []
         task_duration = job.unscheduled_tasks.pop()
         task_completion_time = task_duration + get_task_response_time
-        print current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time
+        print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time)
         is_job_complete = job.update_task_completion_details(task_completion_time)
 
         if is_job_complete:
             self.jobs_completed += 1;
-            print >> finished_file, task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " by_def: ",job.job_type_for_comparison, " total_job_running_time: ",(job.end_time - job.start_time)
+            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " by_def: ",job.job_type_for_comparison, " total_job_running_time: ",(job.end_time - job.start_time), file=finished_file)
 
         events.append((task_completion_time, TaskEndEvent(worker, self.SCHEDULE_BIG_CENTRALIZED, self.cluster_status_keeper, job.id, job.job_type_for_scheduling, job.estimated_task_duration, this_task_id)))
         
@@ -1124,10 +1156,51 @@ class Simulation(object):
 
         return worker_index,probes
 
+    # Simulation class
+    def send_tasks_murmuration(self, job, current_time, scheduler_indices):
+        self.jobs[job.id] = job
+        task_arrival_events = []
+        # Some safety checks
+        if len(scheduler_indices) != 1:
+            raise AssertionError('Murmuration received more than one scheduler for the job?')
+        # scheduler_index denotes the exactly one scheduler node ID where this job request lands.
+        scheduler_index = scheduler_indices[0]
+        #.append(job.estimated_task_duration)
+
+        # Sort all workers running long jobs in this DC according to their estimated times.
+        # Ranking policy used - Least estimated time and hole duration > estimted task time.
+        # Find machines for tasks and trigger events.
+        # Returns a set of machines to service tasks of the job - (m1, m2, ...).
+        # May be less than the number of tasks due to same machines hosting more than one task.
+        machine_indices_duration = self.find_machines_murmuration(job, current_time, scheduler_index)
+        for machine_id in machine_indices_duration.keys():
+            task_arrival_events.append((current_time, ProbeEventForMachines(self.machines[machine_id])))
+        task_arrival_events.append((current_time + UPDATE_DELAY, ApplySchedulerUpdates(machine_indices_duration, scheduler_index, current_time)))
+        print(current_time, scheduler_index, job.id, job.num_tasks, machine_indices_duration.keys(), file=scheduler_file)
+        return task_arrival_events
+
+    #Simulation class
+    def process_machine_task(self, machine, core_id, job_id, task_index, task_duration, current_time, probe_arrival_time):
+        job = self.jobs[job_id]
+        task_wait_time = current_time - probe_arrival_time
+
+        events = []
+        job.unscheduled_tasks.remove(task_duration)
+        task_completion_time = task_duration + current_time
+        #print("Job id", job_id, current_time, " machine ", machine.id, "cores ",core_id, " job id ", job_id, " task index: ", task_index," task duration: ", task_duration, " arrived at ", probe_arrival_time, "and will finish at time ", task_completion_time)
+
+        events.append((task_completion_time, TaskEndEvent(core_id, task_duration, job_id, task_wait_time)))
+        return events
+
 
     #Simulation class
     def run(self):
+        global utilization
+        global time_elapsed_in_dc
+        global total_busyness
+        global start_time_in_dc
         last_time = 0
+        unique = count()
 
         self.jobs_file = open(self.WORKLOAD_FILE, 'r')
 
@@ -1152,23 +1225,40 @@ class Simulation(object):
 
         line = self.jobs_file.readline()
         new_job = Job(self.task_distribution, line, estimate_distribution, self.off_mean_bottom, self.off_mean_top)
-        self.event_queue.put((float(line.split()[0]), JobArrival(self, self.task_distribution, new_job, self.jobs_file)))
+        start_time_in_dc = (float(line.split()[0])) / SPEEDUP
+        self.event_queue.put((start_time_in_dc, next(unique), JobArrival(self, self.task_distribution, new_job, self.jobs_file)))
         self.jobs_scheduled = 1
-        self.event_queue.put((float(line.split()[0]), PeriodicTimerEvent(self)))
+        self.event_queue.put((start_time_in_dc, next(unique), PeriodicTimerEvent(self)))
 
         while (not self.event_queue.empty()):
-            current_time, event = self.event_queue.get()
-            assert current_time >= last_time
+            current_time, num, event = self.event_queue.get()
+            if current_time < last_time:
+                raise AssertionError("Got current time "+ str(current_time)+" less than last time "+ str(last_time))
             last_time = current_time
             new_events = event.run(current_time)
-            for new_event in new_events:
-                self.event_queue.put(new_event)
+            for priority, item in new_events:
+                self.event_queue.put((priority, next(unique), item))
 
-        print "Simulation ending, no more events"
+        for worker in self.workers:
+            total_busyness += worker.busy_time
+
+
+        print("Simulation ending, no more events. Jobs completed", self.jobs_completed)
         self.jobs_file.close()
+
+        # Calculate utilizations of worker machines in DC
+        time_elapsed_in_dc = current_time - start_time_in_dc
+        print("Total time elapsed in the DC is", time_elapsed_in_dc, "s")
+        utilization = 100 * (float(total_busyness) / float(time_elapsed_in_dc * len(self.workers)))
 
 #####################################################################################################################
 #globals
+utilization = 0.0
+time_elapsed_in_dc = 0.0
+total_busyness = 0.0
+start_time_in_dc = 0.0
+num_collisions = 0
+job_count = 1
 
 finished_file   = open('finished_file', 'w')
 load_file       = open('load_file', 'w')
@@ -1177,12 +1267,13 @@ stats_file      = open('stats_file', 'w')
 NETWORK_DELAY = 0.0005
 BIG = 1
 SMALL = 0
+SPEEDUP = 1000
 
 job_start_tstamps = {}
 
 random.seed(123456798)
-if(len(sys.argv) != 23):
-    print "Incorrent number of parameters."
+if(len(sys.argv) != 25):
+    print("Incorrent number of parameters.")
     sys.exit(1)
 
 
@@ -1207,7 +1298,12 @@ SRPT_ENABLED                    = (sys.argv[18] == "yes")
 HEARTBEAT_DELAY                 = int(sys.argv[19])
 MIN_NR_PROBES                   = int(sys.argv[20])
 SBP_ENABLED                     = (sys.argv[21] == "yes")
-SYSTEM_SIMULATED                = sys.argv[22]  
+SYSTEM_SIMULATED                = sys.argv[22]
+RATIO_SCHEDULERS_TO_WORKERS     = float(sys.argv[23])
+if RATIO_SCHEDULERS_TO_WORKERS > 1:
+    print("Scheduler to Cores ratio cannot exceed 1")
+    sys.exit(1)
+UPDATE_DELAY                    = int(sys.argv[24])
 
 #MIN_NR_PROBES = 20 #1/100*TOTAL_WORKERS
 CAP_SRPT_SBP = 5 #cap on the % of slowdown a job can tolerate for SRPT and SBP
@@ -1218,43 +1314,43 @@ stats = Stats()
 s = Simulation(MONITOR_INTERVAL, stealing, SCHEDULE_BIG_CENTRALIZED, WORKLOAD_FILE,CUTOFF_THIS_EXP,CUTOFF_BIG_SMALL,ESTIMATION,OFF_MEAN_BOTTOM,OFF_MEAN_TOP,TOTAL_WORKERS)
 s.run()
 
-print "Simulation ended in ", (time.time() - t1), " s "
+print("Simulation ended in ", (time.time() - t1), " s ")
 
 finished_file.close()
 load_file.close()
 
 
-print >> stats_file, "STATS_SH_PROBES_ASSIGNED_IN_BP:      ",    stats.STATS_SH_PROBES_ASSIGNED_IN_BP
-print >> stats_file, "STATS_SH_PROBES_QUEUED_BEHIND_BIG:      ",    stats.STATS_SH_PROBES_QUEUED_BEHIND_BIG 
-print >> stats_file, "STATS_TASKS_SH_EXEC_IN_BP:             ",     stats.STATS_TASKS_SH_EXEC_IN_BP
-print >> stats_file, "STATS_SHORT_TASKS_WAITED_FOR_BIG:         ",           stats.STATS_SHORT_TASKS_WAITED_FOR_BIG
-print >> stats_file, "STATS_SHORT_JOBS_HAVING_TASKS_THAT_WAITED_FOR_BIG:         ",           len(s.jobs_affected_by_holb)
-print >> stats_file, "                                 "
-print >> stats_file, "STATS_TOTAL_STOLEN_PROBES:        ",           stats.STATS_TOTAL_STOLEN_PROBES 
-print >> stats_file, "STATS_TOTAL_STOLEN_B_FROM_B_PROBES:        ",           stats.STATS_TOTAL_STOLEN_B_FROM_B_PROBES 
-print >> stats_file, "STATS_TOTAL_STOLEN_S_FROM_S_PROBES:        ",           stats.STATS_TOTAL_STOLEN_S_FROM_S_PROBES 
-print >> stats_file, "STATS_TOTAL_STOLEN_S_FROM_B_PROBES:        ",           stats.STATS_TOTAL_STOLEN_S_FROM_B_PROBES 
-print >> stats_file, "STATS_SHORT_UNSUCC_PROBES_IN_BIG:        ",           stats.STATS_SHORT_UNSUCC_PROBES_IN_BIG 
+print("STATS_SH_PROBES_ASSIGNED_IN_BP:      ",    stats.STATS_SH_PROBES_ASSIGNED_IN_BP, file=stats_file)
+print("STATS_SH_PROBES_QUEUED_BEHIND_BIG:      ",    stats.STATS_SH_PROBES_QUEUED_BEHIND_BIG, file=stats_file) 
+print("STATS_TASKS_SH_EXEC_IN_BP:             ",     stats.STATS_TASKS_SH_EXEC_IN_BP, file=stats_file)
+print("STATS_SHORT_TASKS_WAITED_FOR_BIG:         ",           stats.STATS_SHORT_TASKS_WAITED_FOR_BIG, file=stats_file)
+print("STATS_SHORT_JOBS_HAVING_TASKS_THAT_WAITED_FOR_BIG:         ",           len(s.jobs_affected_by_holb), file=stats_file)
+print("                                 ", file=stats_file)
+print("STATS_TOTAL_STOLEN_PROBES:        ",           stats.STATS_TOTAL_STOLEN_PROBES, file=stats_file)
+print("STATS_TOTAL_STOLEN_B_FROM_B_PROBES:        ",           stats.STATS_TOTAL_STOLEN_B_FROM_B_PROBES, file=stats_file) 
+print("STATS_TOTAL_STOLEN_S_FROM_S_PROBES:        ",           stats.STATS_TOTAL_STOLEN_S_FROM_S_PROBES , file=stats_file)
+print("STATS_TOTAL_STOLEN_S_FROM_B_PROBES:        ",           stats.STATS_TOTAL_STOLEN_S_FROM_B_PROBES , file=stats_file)
+print("STATS_SHORT_UNSUCC_PROBES_IN_BIG:        ",           stats.STATS_SHORT_UNSUCC_PROBES_IN_BIG , file=stats_file)
     
-print >> stats_file, "STATS_SUCCESSFUL_STEAL_ATTEMPTS: ",           stats.STATS_SUCCESSFUL_STEAL_ATTEMPTS
-print >> stats_file, "STATS_STEALING_MESSAGES:         ",           stats.STATS_STEALING_MESSAGES
-print >> stats_file, "                                 "
-print >> stats_file, "STATS_STICKY_EXECUTIONS:             ",           stats.STATS_STICKY_EXECUTIONS
-print >> stats_file, "STATS_STICKY_EXECUTIONS_IN_BP:             ",           stats.STATS_STICKY_EXECUTIONS_IN_BP
-print >> stats_file, "STATS_REASSIGNED_PROBES:             ",           stats.STATS_REASSIGNED_PROBES
-print >> stats_file, "STATS_BYPASSEDBYBIG_AND_STUCK:             ",           stats.STATS_BYPASSEDBYBIG_AND_STUCK
-print >> stats_file, "STATS_FALLBACKS_TO_SP:             ",           stats.STATS_FALLBACKS_TO_SP
-print >> stats_file, "STATS_RND_FIRST_ROUND_NO_LOCAL_BITMAP:             ",           stats.STATS_RND_FIRST_ROUND_NO_LOCAL_BITMAP
+print("STATS_SUCCESSFUL_STEAL_ATTEMPTS: ",           stats.STATS_SUCCESSFUL_STEAL_ATTEMPTS, file=stats_file)
+print("STATS_STEALING_MESSAGES:         ",           stats.STATS_STEALING_MESSAGES, file=stats_file)
+print("                                 ", file=stats_file)
+print("STATS_STICKY_EXECUTIONS:             ",           stats.STATS_STICKY_EXECUTIONS, file=stats_file)
+print("STATS_STICKY_EXECUTIONS_IN_BP:             ",           stats.STATS_STICKY_EXECUTIONS_IN_BP, file=stats_file)
+print("STATS_REASSIGNED_PROBES:             ",           stats.STATS_REASSIGNED_PROBES, file=stats_file)
+print("STATS_BYPASSEDBYBIG_AND_STUCK:             ",           stats.STATS_BYPASSEDBYBIG_AND_STUCK, file=stats_file)
+print("STATS_FALLBACKS_TO_SP:             ",           stats.STATS_FALLBACKS_TO_SP, file=stats_file)
+print("STATS_RND_FIRST_ROUND_NO_LOCAL_BITMAP:             ",           stats.STATS_RND_FIRST_ROUND_NO_LOCAL_BITMAP, file=stats_file)
 if(stats.STATS_ROUNDS_ATTEMPTS!=0):
-    print >> stats_file, "STATS_ROUNDS/STATS_ROUNDS_ATTEMPTS:             ",           stats.STATS_ROUNDS*1.0/stats.STATS_ROUNDS_ATTEMPTS
-    print >> stats_file, "STATS_PERC_1ST_ROUNDS/STATS_ROUNDS_ATTEMPTS:    ",           stats.STATS_PERC_1ST_ROUNDS*1.0/stats.STATS_ROUNDS_ATTEMPTS
-print >> stats_file, "                                 "
-print >> stats_file, "STATS_TASKS_TOTAL_FINISHED:             ",          stats.STATS_TASKS_TOTAL_FINISHED
-print >> stats_file, "STATS_TASKS_SHORT_FINISHED:             ",          stats.STATS_TASKS_SHORT_FINISHED
-print >> stats_file, "STATS_TASKS_LONG_FINISHED:             ",          stats.STATS_TASKS_LONG_FINISHED
-print >> stats_file, "STATS_JOBS_FINISHED:             ",          s.jobs_scheduled
+    print("STATS_ROUNDS/STATS_ROUNDS_ATTEMPTS:             ",           stats.STATS_ROUNDS*1.0/stats.STATS_ROUNDS_ATTEMPTS, file=stats_file)
+    print("STATS_PERC_1ST_ROUNDS/STATS_ROUNDS_ATTEMPTS:    ",           stats.STATS_PERC_1ST_ROUNDS*1.0/stats.STATS_ROUNDS_ATTEMPTS, file=stats_file)
+print("                                 ", file=stats_file)
+print("STATS_TASKS_TOTAL_FINISHED:             ",          stats.STATS_TASKS_TOTAL_FINISHED, file=stats_file)
+print("STATS_TASKS_SHORT_FINISHED:             ",          stats.STATS_TASKS_SHORT_FINISHED, file=stats_file)
+print("STATS_TASKS_LONG_FINISHED:             ",          stats.STATS_TASKS_LONG_FINISHED, file=stats_file)
+print("STATS_JOBS_FINISHED:             ",          s.jobs_scheduled, file=stats_file)
 
 if(SYSTEM_SIMULATED=="Eagle"):
-    print >> stats_file, "%TASKS AFFECTED BY HOLB ",stats.STATS_SHORT_TASKS_WAITED_FOR_BIG*1.0/stats.STATS_TASKS_SHORT_FINISHED," %JOBS ",len(s.jobs_affected_by_holb)*1.0/s.jobs_scheduled
+    print("%TASKS AFFECTED BY HOLB ",stats.STATS_SHORT_TASKS_WAITED_FOR_BIG*1.0/stats.STATS_TASKS_SHORT_FINISHED," %JOBS ",len(s.jobs_affected_by_holb)*1.0/s.jobs_scheduled, file=stats_file)
 
 stats_file.close()
