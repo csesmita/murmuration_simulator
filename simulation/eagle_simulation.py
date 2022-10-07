@@ -30,6 +30,7 @@ import bitmap
 import copy
 from collections import deque, defaultdict
 from itertools import count
+from operator import itemgetter
 
 class TaskDurationDistributions:
     CONSTANT, MEAN, FROM_FILE  = range(3)
@@ -61,6 +62,7 @@ class Job(object):
         self.completed_tasks_count = 0
         self.end_time = self.start_time
         self.unscheduled_tasks = deque()
+        self.actual_task_duration = deque()
         self.off_mean_bottom = off_mean_bottom
         self.off_mean_top = off_mean_top
 
@@ -102,6 +104,7 @@ class Job(object):
     def file_task_execution_time(self, job_args):
         for task_duration in (job_args[3:]):
            self.unscheduled_tasks.appendleft(int(float(task_duration)))
+           self.actual_task_duration.appendleft(int(float(task_duration)))
         assert(len(self.unscheduled_tasks) == self.num_tasks)
 
     #Job class
@@ -193,6 +196,9 @@ class JobArrival(Event):
                 estimated_task_durations = [self.job.estimated_task_duration for i in range(len(self.job.unscheduled_tasks))]
                 worker_indices = self.simulation.find_workers_dlwl(estimated_task_durations, self.simulation.shared_cluster_status, current_time, self.simulation, possible_workers)
                 self.simulation.cluster_status_keeper.update_workers_queue(worker_indices, True, self.job.estimated_task_duration)
+            elif (SYSTEM_SIMULATED == "Murmuration"):
+                #In Murmuration, worker_indices are first populated with a random scheduler index.
+                worker_indices.append(random.choice(self.simulation.scheduler_indices))
             elif (self.simulation.SCHEDULE_BIG_CENTRALIZED):
                 workers_queue_status = self.simulation.cluster_status_keeper.get_queue_status()
                 if SYSTEM_SIMULATED == "CLWL" and self.job.job_type_for_comparison == SMALL:
@@ -335,19 +341,19 @@ class ClusterStatusKeeper():
         core_availability += duration
         availability_at_cores[core_id] = core_availability
 
-    def get_machine_with_shortest_wait(self, scheduler_index, current_time):
-        current_time = int(ceil(current_time))
+    def get_worker_with_shortest_wait(self, scheduler_index, current_time):
+        current_time = int(math.ceil(current_time))
         availability_at_cores = self.scheduler_view[scheduler_index]
         if len(availability_at_cores) == 0:
             return 0, current_time
-        chosen_machine, best_fit_time = (sorted(availability_at_cores.items(), key=itemgetter(1)))[0]
+        chosen_worker, best_fit_time = (sorted(availability_at_cores.items(), key=itemgetter(1)))[0]
         if best_fit_time < current_time:
             best_fit_time = current_time
-        return chosen_machine, best_fit_time
+        return chosen_worker, best_fit_time
 
 
     def update_worker_queues_free_time(self, core_id, start_time, end_time, current_time, scheduler_index):
-        current_time = int(ceil(current_time))
+        current_time = int(math.ceil(current_time))
 
         duration = end_time - start_time
         updated_view = 0
@@ -808,6 +814,25 @@ class Worker(object):
 
         return position_in_queue
 
+
+#####################################################################################################################
+#####################################################################################################################
+class ApplySchedulerUpdates:
+    def __init__(self, machines_and_durations, origin_scheduler_index, scheduler_indices, cluster_status_keeper, history_time):
+        self.origin_scheduler_index  = origin_scheduler_index
+        self.machines_and_durations = machines_and_durations
+        self.history_time = int(math.ceil(history_time))
+        self.scheduler_indices = scheduler_indices
+        self.status_keeper = cluster_status_keeper
+
+    def run(self, current_time):
+        current_time = int(math.ceil(current_time))
+        for machine_id, duration in self.machines_and_durations.items():
+            for rx_scheduler_id in self.scheduler_indices:
+                self.status_keeper.update_scheduler_view(self.origin_scheduler_index, rx_scheduler_id, machine_id, current_time, self.history_time, duration)
+        return []
+
+
 #####################################################################################################################
 #####################################################################################################################
 
@@ -1005,18 +1030,18 @@ class Simulation(object):
         return chosen_worker_indices
 
     #Simulation class
-    def find_machines_murmuration(self, job, current_time, scheduler_index):
+    def find_workers_murmuration(self, job, current_time, scheduler_index):
         global num_collisions
         best_fit_for_tasks = defaultdict(int)
         for task_index in range(job.num_tasks):
-            duration = int(ceil(job.actual_task_duration[task_index]))
-            chosen_machine, best_fit_time = keeper.get_machine_with_shortest_wait(scheduler_index, current_time)
-            best_fit_for_tasks[chosen_machine] += duration
-            #Update est time at this machine and its cores
-            #print("Picked machine", chosen_machine," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_fit_time)
-            best_fit_time, has_collision = keeper.update_worker_queues_free_time(chosen_machine, best_fit_time, best_fit_time + duration, current_time, scheduler_index)
-            probe_params = [chosen_machine, job.id, task_index, current_time]
-            self.machines[chosen_machine].add_machine_probe(best_fit_time, probe_params)
+            duration = int(math.ceil(job.actual_task_duration[task_index]))
+            chosen_worker, best_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time)
+            best_fit_for_tasks[chosen_worker] += duration
+            #Update est time at this worker and its cores
+            #print("Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_fit_time)
+            best_fit_time, has_collision = self.cluster_status_keeper.update_worker_queues_free_time(chosen_worker, best_fit_time, best_fit_time + duration, current_time, scheduler_index)
+            #probe_params = [chosen_worker, job.id, task_index, current_time]
+            #self.workers[chosen_worker].add_probe(best_fit_time, probe_params)
             if has_collision:
                 num_collisions += 1
                 job.has_collision = True
@@ -1037,7 +1062,7 @@ class Simulation(object):
         if SYSTEM_SIMULATED == "DLWL":
             return self.send_probes_hawk(job, current_time, worker_indices, btmap)
         if SYSTEM_SIMULATED == "Murmuration":
-            return self.send_tasks_murmuration(job, current_time, worker_indices)
+            return self.send_tasks_murmuration(job, current_time, worker_indices, btmap)
 
 
     #Simulation class
@@ -1049,6 +1074,32 @@ class Simulation(object):
             probe_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_index], job.id, job.estimated_task_duration, job.job_type_for_scheduling, btmap)))
             job.probed_workers.add(worker_index)
         return probe_events
+
+
+    # Simulation class
+    def send_tasks_murmuration(self, job, current_time, scheduler_indices, btmap):
+        self.jobs[job.id] = job
+        task_arrival_events = []
+        # Some safety checks
+        if len(scheduler_indices) != 1:
+            raise AssertionError('Murmuration received more than one scheduler for the job?')
+        # scheduler_index denotes the exactly one scheduler node ID where this job request lands.
+        scheduler_index = scheduler_indices[0]
+        #.append(job.estimated_task_duration)
+
+        # Sort all workers running long jobs in this DC according to their estimated times.
+        # Ranking policy used - Least estimated time and hole duration > estimted task time.
+        # Find workers for tasks and trigger events.
+        # Returns a set of workers to service tasks of the job - (m1, m2, ...).
+        # May be less than the number of tasks due to same workers hosting more than one task.
+        worker_indices_duration = self.find_workers_murmuration(job, current_time, scheduler_index)
+        for worker_id in worker_indices_duration.keys():
+            #probe_params = [chosen_worker, job.id, task_index, current_time]
+            #self.workers[chosen_worker].add_probe(best_fit_time, probe_params)
+            task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, job.job_type_for_scheduling, btmap)))
+        task_arrival_events.append((current_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates(worker_indices_duration, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time)))
+        return task_arrival_events
+
 
 
     #Simulation class
@@ -1214,38 +1265,15 @@ class Simulation(object):
 
         return worker_index,probes
 
-    # Simulation class
-    def send_tasks_murmuration(self, job, current_time, scheduler_indices):
-        self.jobs[job.id] = job
-        task_arrival_events = []
-        # Some safety checks
-        if len(scheduler_indices) != 1:
-            raise AssertionError('Murmuration received more than one scheduler for the job?')
-        # scheduler_index denotes the exactly one scheduler node ID where this job request lands.
-        scheduler_index = scheduler_indices[0]
-        #.append(job.estimated_task_duration)
-
-        # Sort all workers running long jobs in this DC according to their estimated times.
-        # Ranking policy used - Least estimated time and hole duration > estimted task time.
-        # Find machines for tasks and trigger events.
-        # Returns a set of machines to service tasks of the job - (m1, m2, ...).
-        # May be less than the number of tasks due to same machines hosting more than one task.
-        machine_indices_duration = self.find_machines_murmuration(job, current_time, scheduler_index)
-        for machine_id in machine_indices_duration.keys():
-            task_arrival_events.append((current_time, ProbeEventForMachines(self.machines[machine_id])))
-        task_arrival_events.append((current_time + UPDATE_DELAY, ApplySchedulerUpdates(machine_indices_duration, scheduler_index, current_time)))
-        print(current_time, scheduler_index, job.id, job.num_tasks, machine_indices_duration.keys(), file=scheduler_file)
-        return task_arrival_events
-
     #Simulation class
-    def process_machine_task(self, machine, core_id, job_id, task_index, task_duration, current_time, probe_arrival_time):
+    def process_worker_task(self, worker, core_id, job_id, task_index, task_duration, current_time, probe_arrival_time):
         job = self.jobs[job_id]
         task_wait_time = current_time - probe_arrival_time
 
         events = []
         job.unscheduled_tasks.remove(task_duration)
         task_completion_time = task_duration + current_time
-        #print("Job id", job_id, current_time, " machine ", machine.id, "cores ",core_id, " job id ", job_id, " task index: ", task_index," task duration: ", task_duration, " arrived at ", probe_arrival_time, "and will finish at time ", task_completion_time)
+        #print("Job id", job_id, current_time, " worker ", worker.id, "cores ",core_id, " job id ", job_id, " task index: ", task_index," task duration: ", task_duration, " arrived at ", probe_arrival_time, "and will finish at time ", task_completion_time)
 
         events.append((task_completion_time, TaskEndEvent(core_id, task_duration, job_id, task_wait_time)))
         return events
@@ -1304,7 +1332,7 @@ class Simulation(object):
         print("Simulation ending, no more events. Jobs completed", self.jobs_completed)
         self.jobs_file.close()
 
-        # Calculate utilizations of worker machines in DC
+        # Calculate utilizations of workers in DC
         time_elapsed_in_dc = current_time - start_time_in_dc
         utilization = 100 * (float(total_busyness) / float(time_elapsed_in_dc * len(self.workers)))
         print("Total time elapsed in the DC is", time_elapsed_in_dc, "s and utilization is", utilization)
