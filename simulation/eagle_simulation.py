@@ -280,15 +280,16 @@ class WorkerHeartbeatEvent(Event):
 #####################################################################################################################
 
 class ProbeEvent(Event):
-    def __init__(self, worker, job_id, task_length, job_type_for_scheduling, btmap):
+    def __init__(self, worker, job_id, est_task_length, job_type_for_scheduling, btmap, task_index):
         self.worker = worker
         self.job_id = job_id
-        self.task_length = task_length
+        self.est_task_length = est_task_length
         self.job_type_for_scheduling = job_type_for_scheduling
         self.btmap = btmap
+        self.task_index = task_index
 
     def run(self, current_time):
-        return self.worker.add_probe(self.job_id, self.task_length, self.job_type_for_scheduling, current_time,self.btmap, False)
+        return self.worker.add_probe(self.job_id, self.est_task_length, self.job_type_for_scheduling, current_time,self.btmap, False, task_index)
 
 #####################################################################################################################
 #####################################################################################################################
@@ -323,11 +324,11 @@ class ClusterStatusKeeper():
             assert queue >= 0, (" offending value for queue: %r %i " % (queue,worker))
             self.worker_queues[worker] = queue
 
+    #Update rx scheduler with placement info.
     def update_scheduler_view(self, origin_scheduler_index, rx_scheduler_index, core_id,current_time, history_time, duration):
         if origin_scheduler_index == rx_scheduler_index:
             return
         availability_at_cores = self.scheduler_view[rx_scheduler_index]
-        last_updated_time = 0
         core_availability = 0
         if core_id in availability_at_cores.keys():
             core_availability = availability_at_cores[core_id]
@@ -341,38 +342,23 @@ class ClusterStatusKeeper():
         core_availability += duration
         availability_at_cores[core_id] = core_availability
 
-    def get_worker_with_shortest_wait(self, scheduler_index, current_time):
+    #Get shortest wait time node from cache. Update scheduler with placement info.
+    def get_worker_with_shortest_wait(self, scheduler_index, current_time, duration):
         current_time = int(math.ceil(current_time))
         availability_at_cores = self.scheduler_view[scheduler_index]
         if len(availability_at_cores) == 0:
             return 0, current_time
         chosen_worker, best_fit_time = (sorted(availability_at_cores.items(), key=itemgetter(1)))[0]
         if best_fit_time < current_time:
+            #Fill the hole
             best_fit_time = current_time
+        availability_at_cores[chosen_machine] = best_fit_time + duration
         return chosen_worker, best_fit_time
 
-
-    def update_worker_queues_free_time(self, core_id, start_time, end_time, current_time, scheduler_index):
+    #Update the workers with placement info.
+    def update_worker_queues_free_time(self, core_id, start_time, duration, current_time):
         current_time = int(math.ceil(current_time))
-
-        duration = end_time - start_time
-        updated_view = 0
-        availability_at_cores = self.scheduler_view[scheduler_index]
         actual_start_at_worker = self.worker_queues[core_id] if self.worker_queues[core_id] > current_time else current_time
-        if core_id in availability_at_cores.keys():
-            updated_view = availability_at_cores[core_id]
-
-        if start_time > updated_view:
-            #Placement happened after previous tasks had completed.
-            #This advancement cannot be reversed.
-            #All durations get added beyond this hole.
-            updated_view = start_time
-        updated_view += duration
-        availability_at_cores[core_id] = updated_view
-
-        #Scheduler sees a longer queue at worker if it had jumped a hole in its view.
-        #if actual_start_at_worker < start_time:
-            #print "Actual start at worker", core_id,"is",actual_start_at_worker, "while scheduler predicted",start_time
         #Update the actual worker's queue.
         self.worker_queues[core_id] = actual_start_at_worker + duration
         has_collision = False if start_time == actual_start_at_worker else True
@@ -470,7 +456,7 @@ class Worker(object):
         self.num_tasks = 0
 
     #Worker class
-    def add_probe(self, job_id, task_length, job_type_for_scheduling, current_time, btmap, handle_stealing):
+    def add_probe(self, job_id, task_length, job_type_for_scheduling, current_time, btmap, handle_stealing, task_index):
         global stats
 
         long_job = job_type_for_scheduling == BIG
@@ -480,7 +466,7 @@ class Worker(object):
         if (not long_job and handle_stealing == False and  self.in_big):        
             stats.STATS_SH_PROBES_ASSIGNED_IN_BP +=1
 
-        self.queued_probes.append([job_id,task_length,(self.executing_big == True or self.queued_big > 0), 0, False,-1])
+        self.queued_probes.append([job_id,task_length,(self.executing_big == True or self.queued_big > 0), 0, False,-1, task_index])
 
         if (long_job):
             self.queued_big     = self.queued_big + 1
@@ -637,6 +623,7 @@ class Worker(object):
 
         job_id = self.queued_probes[pos][0]
         estimated_task_duration = self.queued_probes[pos][1]
+        task_index = self.queued_probes[pos][6]
 
         self.executing_big = self.simulation.jobs[job_id].job_type_for_scheduling == BIG
         if self.executing_big:
@@ -646,7 +633,7 @@ class Worker(object):
         else:
             self.tstamp_start_crt_big_task = -1
 
-        was_successful, events = self.simulation.get_task(job_id, self, current_time)
+        was_successful, events = self.simulation.get_task(job_id, self, current_time, task_index)
         job_bydef_big = (self.simulation.jobs[job_id].job_type_for_comparison == BIG)
        
         if(not job_bydef_big and self.queued_probes[0][5] == 1 and self.in_big and was_successful):
@@ -1032,14 +1019,13 @@ class Simulation(object):
     #Simulation class
     def find_workers_murmuration(self, job, current_time, scheduler_index):
         global num_collisions
-        best_fit_for_tasks = defaultdict(int)
+        best_fit_for_tasks = defaultdict(tuple)
         for task_index in range(job.num_tasks):
             duration = int(math.ceil(job.actual_task_duration[task_index]))
-            chosen_worker, best_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time)
-            best_fit_for_tasks[chosen_worker] += duration
+            chosen_worker, best_scheduler_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time, duration)
             #Update est time at this worker and its cores
             #print("Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_fit_time)
-            best_fit_time, has_collision = self.cluster_status_keeper.update_worker_queues_free_time(chosen_worker, best_fit_time, best_fit_time + duration, current_time, scheduler_index)
+            best_fit_time, has_collision = self.cluster_status_keeper.update_worker_queues_free_time(chosen_worker, best_scheduler_fit_time, duration, current_time)
             #probe_params = [chosen_worker, job.id, task_index, current_time]
             #self.workers[chosen_worker].add_probe(best_fit_time, probe_params)
             if has_collision:
@@ -1047,6 +1033,7 @@ class Simulation(object):
                 job.has_collision = True
                 #print("adjusted to", best_fit_time)
             #print("")
+            best_fit_for_tasks[task_index] = (chosen_worker, duration)
         return best_fit_for_tasks
 
 
@@ -1071,7 +1058,7 @@ class Simulation(object):
 
         probe_events = []
         for worker_index in worker_indices:
-            probe_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_index], job.id, job.estimated_task_duration, job.job_type_for_scheduling, btmap)))
+            probe_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_index], job.id, job.estimated_task_duration, job.job_type_for_scheduling, btmap, -1)))
             job.probed_workers.add(worker_index)
         return probe_events
 
@@ -1085,19 +1072,13 @@ class Simulation(object):
             raise AssertionError('Murmuration received more than one scheduler for the job?')
         # scheduler_index denotes the exactly one scheduler node ID where this job request lands.
         scheduler_index = scheduler_indices[0]
-        #.append(job.estimated_task_duration)
-
-        # Sort all workers running long jobs in this DC according to their estimated times.
-        # Ranking policy used - Least estimated time and hole duration > estimted task time.
-        # Find workers for tasks and trigger events.
-        # Returns a set of workers to service tasks of the job - (m1, m2, ...).
-        # May be less than the number of tasks due to same workers hosting more than one task.
+        workers_durations = defaultdict(int)
         worker_indices_duration = self.find_workers_murmuration(job, current_time, scheduler_index)
-        for worker_id in worker_indices_duration.keys():
-            #probe_params = [chosen_worker, job.id, task_index, current_time]
-            #self.workers[chosen_worker].add_probe(best_fit_time, probe_params)
-            task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, job.job_type_for_scheduling, btmap)))
-        task_arrival_events.append((current_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates(worker_indices_duration, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time)))
+        for task_index, value in worker_indices_duration.keys():
+            worker_id, duration = value
+            workers_durations[worker_id] = duration
+            task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, BIG, btmap, task_index)))
+        task_arrival_events.append((current_time + NETWORK_DELAY, ApplySchedulerUpdates(workers_durations, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time)))
         return task_arrival_events
 
 
@@ -1110,7 +1091,7 @@ class Simulation(object):
 
         for worker_index in worker_list:
             if(not self.workers[worker_index].executing_big and not self.workers[worker_index].queued_big):
-                probe_events.append((current_time + NETWORK_DELAY*(roundnr/2+1), ProbeEvent(self.workers[worker_index], job.id, job.estimated_task_duration, job.job_type_for_scheduling, None)))
+                probe_events.append((current_time + NETWORK_DELAY*(roundnr/2+1), ProbeEvent(self.workers[worker_index], job.id, job.estimated_task_duration, job.job_type_for_scheduling, None, -1)))
                 job.probed_workers.add(worker_index)
                 successful_worker_indices.append(worker_index)
             if (self.workers[worker_index].btmap_tstamp > freshest_btmap_tstamp):
@@ -1153,7 +1134,7 @@ class Simulation(object):
 
         if (job.job_type_for_scheduling == BIG):
             for worker_index in worker_indices:
-                probe_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_index], job.id, job.estimated_task_duration, job.job_type_for_scheduling, btmap)))
+                probe_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_index], job.id, job.estimated_task_duration, job.job_type_for_scheduling, btmap, -1)))
                 job.probed_workers.add(worker_index)
 
         else:
@@ -1227,18 +1208,25 @@ class Simulation(object):
 
 
     #Simulation class
-    def get_task(self, job_id, worker, current_time):
+    def get_task(self, job_id, worker, current_time, task_index):
         job = self.jobs[job_id]
         #account for the fact that this is called when the probe is launched but it needs an RTT to talk to the scheduler
         get_task_response_time = current_time + 2 * NETWORK_DELAY
         
         if len(job.unscheduled_tasks) == 0 :
+            #Redundant probe.
             return False, [(get_task_response_time, NoopGetTaskResponseEvent(worker))]
 
         this_task_id=job.completed_tasks_count
         Job.per_job_task_info[job_id][this_task_id] = current_time
         events = []
-        task_duration = job.unscheduled_tasks.pop()
+        task_duration = 0
+        if task_index > -1:
+            task_duration = job.actual_task_duration[task_index]
+            job.unscheduled_tasks.remove(task_duration)
+        else:
+            task_duration = job.unscheduled_tasks.pop()
+        worker.busy_time += task_duration
         task_completion_time = task_duration + get_task_response_time
         print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time)
         is_job_complete = job.update_task_completion_details(task_completion_time)
@@ -1264,20 +1252,6 @@ class Simulation(object):
         elif (STEALING_STRATEGY == "RANDOM"):       probes = self.workers[worker_index].get_probes_random(current_time, free_worker_id)
 
         return worker_index,probes
-
-    #Simulation class
-    def process_worker_task(self, worker, core_id, job_id, task_index, task_duration, current_time, probe_arrival_time):
-        job = self.jobs[job_id]
-        task_wait_time = current_time - probe_arrival_time
-
-        events = []
-        job.unscheduled_tasks.remove(task_duration)
-        task_completion_time = task_duration + current_time
-        #print("Job id", job_id, current_time, " worker ", worker.id, "cores ",core_id, " job id ", job_id, " task index: ", task_index," task duration: ", task_duration, " arrived at ", probe_arrival_time, "and will finish at time ", task_completion_time)
-
-        events.append((task_completion_time, TaskEndEvent(core_id, task_duration, job_id, task_wait_time)))
-        return events
-
 
     #Simulation class
     def run(self):
