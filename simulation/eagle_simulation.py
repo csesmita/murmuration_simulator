@@ -1110,7 +1110,7 @@ class Simulation(object):
     def get_list_non_long_job_workers_from_btmap(self,btmap):
         non_long_job_workers = []
             
-        non_long_job_workers = self.small_not_big_partition_workers[:]
+        non_long_job_workers = list(self.small_not_big_partition_workers[:])
 
         for index in self.big_partition_workers:
             if not btmap.test(index):
