@@ -289,7 +289,7 @@ class ProbeEvent(Event):
         self.task_index = task_index
 
     def run(self, current_time):
-        return self.worker.add_probe(self.job_id, self.est_task_length, self.job_type_for_scheduling, current_time,self.btmap, False, task_index)
+        return self.worker.add_probe(self.job_id, self.est_task_length, self.job_type_for_scheduling, current_time,self.btmap, False, self.task_index)
 
 #####################################################################################################################
 #####################################################################################################################
@@ -352,7 +352,7 @@ class ClusterStatusKeeper():
         if best_fit_time < current_time:
             #Fill the hole
             best_fit_time = current_time
-        availability_at_cores[chosen_machine] = best_fit_time + duration
+        availability_at_cores[chosen_worker] = best_fit_time + duration
         return chosen_worker, best_fit_time
 
     #Update the workers with placement info.
@@ -408,7 +408,7 @@ class TaskEndEvent():
             if(self.worker.in_big):
                 stats.STATS_TASKS_SH_EXEC_IN_BP += 1
 
-        elif (self.SCHEDULE_BIG_CENTRALIZED):
+        elif (self.SCHEDULE_BIG_CENTRALIZED and SYSTEM_SIMULATED != "Murmuration"):
             self.status_keeper.update_workers_queue([self.worker.id], False, self.estimated_task_duration)
 
         if(self.job_type_for_scheduling == BIG):
@@ -527,9 +527,9 @@ class Worker(object):
             print(current_time, ": Worker ", self.id," failed to steal. attempts: ",ctr_it)
             stats.STATS_STEALING_MESSAGES += ctr_it
 
-        for job_id, task_length, behind_big, cum, sticky, handle_steal in new_probes:
+        for job_id, task_length, behind_big, cum, sticky, handle_steal, task_index in new_probes:
             assert (self.simulation.jobs[job_id].job_type_for_comparison != BIG)
-            new_events.extend(self.add_probe(job_id, task_length, SMALL, current_time, None,True))
+            new_events.extend(self.add_probe(job_id, task_length, SMALL, current_time, None,True, task_index))
 
         return new_events
 
@@ -923,7 +923,7 @@ class Simulation(object):
 
         chosen_worker_indices = []
         workers_needed = num_tasks
-        prio_queue = Queue.PriorityQueue()
+        prio_queue = PriorityQueue()
 
         empty_nodes = []  #performance optimization
         for index in hash_workers_considered:
@@ -976,7 +976,7 @@ class Simulation(object):
 
         chosen_worker_indices = []
         workers_needed = len(estimated_task_durations)
-        prio_queue = Queue.PriorityQueue()
+        prio_queue = PriorityQueue()
 
         for index in hash_workers_considered:
             qlen          = workers_queue_status[index]                
@@ -1074,7 +1074,7 @@ class Simulation(object):
         scheduler_index = scheduler_indices[0]
         workers_durations = defaultdict(int)
         worker_indices_duration = self.find_workers_murmuration(job, current_time, scheduler_index)
-        for task_index, value in worker_indices_duration.keys():
+        for task_index, value in worker_indices_duration.items():
             worker_id, duration = value
             workers_durations[worker_id] = duration
             task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, BIG, btmap, task_index)))
@@ -1281,7 +1281,7 @@ class Simulation(object):
 
         if(SYSTEM_SIMULATED == "DLWL"):
             self.shared_cluster_status = self.cluster_status_keeper.get_queue_status()
-            self.event_queue.put((0, WorkerHeartbeatEvent(self)))
+            self.event_queue.put((0, next(unique), WorkerHeartbeatEvent(self)))
 
         line = self.jobs_file.readline()
         new_job = Job(self.task_distribution, line, estimate_distribution, self.off_mean_bottom, self.off_mean_top)
@@ -1333,7 +1333,7 @@ job_start_tstamps = {}
 
 random.seed(123456798)
 if(len(sys.argv) != 25):
-    print("Incorrent number of parameters.")
+    print("Incorrect number of parameters.")
     sys.exit(1)
 
 
