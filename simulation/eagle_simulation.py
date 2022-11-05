@@ -356,7 +356,12 @@ class ClusterStatusKeeper():
         return chosen_worker, best_fit_time
 
     #Update the workers with placement info.
-    def update_worker_queues_free_time(self, core_id, start_time, duration, current_time):
+    def update_worker_queues_free_time(self, core_id, start_time, duration, current_time, increment):
+        if not increment:
+            self.worker_queues[core_id]  -= duration
+            if self.worker_queues[core_id] < 0:
+                raise AssertionError("check worker queue")
+            return self.worker_queues[core_id], False
         current_time = int(math.ceil(current_time))
         actual_start_at_worker = self.worker_queues[core_id] if self.worker_queues[core_id] > current_time else current_time
         #Update the actual worker's queue.
@@ -391,7 +396,7 @@ class UpdateRemainingTimeEvent(Event):
 #####################################################################################################################
 
 class TaskEndEvent():
-    def __init__(self, worker, SCHEDULE_BIG_CENTRALIZED, status_keeper, job_id, job_type_for_scheduling, estimated_task_duration, this_task_id):
+    def __init__(self, worker, SCHEDULE_BIG_CENTRALIZED, status_keeper, job_id, job_type_for_scheduling, estimated_task_duration, this_task_id, task_duration):
         self.worker = worker
         self.SCHEDULE_BIG_CENTRALIZED = SCHEDULE_BIG_CENTRALIZED
         self.status_keeper = status_keeper
@@ -399,6 +404,7 @@ class TaskEndEvent():
         self.job_type_for_scheduling = job_type_for_scheduling
         self.estimated_task_duration = estimated_task_duration
         self.this_task_id = this_task_id
+        self.task_duration= task_duration
 
     def run(self, current_time):
         global stats
@@ -408,7 +414,9 @@ class TaskEndEvent():
             if(self.worker.in_big):
                 stats.STATS_TASKS_SH_EXEC_IN_BP += 1
 
-        elif (self.SCHEDULE_BIG_CENTRALIZED and SYSTEM_SIMULATED != "Murmuration"):
+        if (SYSTEM_SIMULATED == "Murmuration"):
+            self.status_keeper.update_worker_queues_free_time(self.worker.id, 0, self.task_duration, current_time, False)
+        elif (self.SCHEDULE_BIG_CENTRALIZED):
             self.status_keeper.update_workers_queue([self.worker.id], False, self.estimated_task_duration)
 
         if(self.job_type_for_scheduling == BIG):
@@ -465,7 +473,6 @@ class Worker(object):
     
         if (not long_job and handle_stealing == False and  self.in_big):        
             stats.STATS_SH_PROBES_ASSIGNED_IN_BP +=1
-
         self.queued_probes.append([job_id,task_length,(self.executing_big == True or self.queued_big > 0), 0, False,-1, task_index])
 
         if (long_job):
@@ -1025,9 +1032,7 @@ class Simulation(object):
             chosen_worker, best_scheduler_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time, duration)
             #Update est time at this worker and its cores
             #print("Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_fit_time)
-            best_fit_time, has_collision = self.cluster_status_keeper.update_worker_queues_free_time(chosen_worker, best_scheduler_fit_time, duration, current_time)
-            #probe_params = [chosen_worker, job.id, task_index, current_time]
-            #self.workers[chosen_worker].add_probe(best_fit_time, probe_params)
+            best_fit_time, has_collision = self.cluster_status_keeper.update_worker_queues_free_time(chosen_worker, best_scheduler_fit_time, duration, current_time, True)
             if has_collision:
                 num_collisions += 1
                 job.has_collision = True
@@ -1229,16 +1234,21 @@ class Simulation(object):
         worker.busy_time += task_duration
         task_completion_time = task_duration + get_task_response_time
         print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time)
+        print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " starts at ", current_time, " will finish at time ", task_completion_time, file=finished_file)
         is_job_complete = job.update_task_completion_details(task_completion_time)
 
         if is_job_complete:
             self.jobs_completed += 1;
-            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " by_def: ",job.job_type_for_comparison, " total_job_running_time: ",(job.end_time - job.start_time), file=finished_file)
+            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " by_def: ",job.job_type_for_comparison, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, file=finished_file)
 
-        events.append((task_completion_time, TaskEndEvent(worker, self.SCHEDULE_BIG_CENTRALIZED, self.cluster_status_keeper, job.id, job.job_type_for_scheduling, job.estimated_task_duration, this_task_id)))
+        events.append((task_completion_time, TaskEndEvent(worker, self.SCHEDULE_BIG_CENTRALIZED, self.cluster_status_keeper, job.id, job.job_type_for_scheduling, job.estimated_task_duration, this_task_id, task_duration)))
         
         if SRPT_ENABLED and SYSTEM_SIMULATED == "Eagle":
                 events.append((current_time + 2*NETWORK_DELAY, UpdateRemainingTimeEvent(job)))
+
+        if SYSTEM_SIMULATED == "Murmuration":
+            workers_durations = {worker.id: task_duration}
+            events.append((task_completion_time + NETWORK_DELAY, ApplySchedulerUpdates(workers_durations, -1, self.scheduler_indices, self.cluster_status_keeper, current_time)))
 
         if len(job.unscheduled_tasks) == 0:
             logging.info("Finished scheduling tasks for job %s" % job.id)
@@ -1310,6 +1320,7 @@ class Simulation(object):
         time_elapsed_in_dc = current_time - start_time_in_dc
         utilization = 100 * (float(total_busyness) / float(time_elapsed_in_dc * len(self.workers)))
         print("Total time elapsed in the DC is", time_elapsed_in_dc, "s and utilization is", utilization)
+        print("Total time elapsed in the DC is", time_elapsed_in_dc, "s and utilization is", utilization, file=finished_file)
 
 #####################################################################################################################
 #globals
@@ -1410,7 +1421,7 @@ print("STATS_TASKS_SHORT_FINISHED:             ",          stats.STATS_TASKS_SHO
 print("STATS_TASKS_LONG_FINISHED:             ",          stats.STATS_TASKS_LONG_FINISHED, file=stats_file)
 print("STATS_JOBS_FINISHED:             ",          s.jobs_scheduled, file=stats_file)
 
-if(SYSTEM_SIMULATED=="Eagle"):
+if(SYSTEM_SIMULATED=="Eagle" and stats.STATS_TASKS_SHORT_FINISHED > 0):
     print("%TASKS AFFECTED BY HOLB ",stats.STATS_SHORT_TASKS_WAITED_FOR_BIG*1.0/stats.STATS_TASKS_SHORT_FINISHED," %JOBS ",len(s.jobs_affected_by_holb)*1.0/s.jobs_scheduled, file=stats_file)
 
 stats_file.close()
