@@ -23,7 +23,6 @@
 import sys
 import time
 import logging
-import math
 import random
 from queue import PriorityQueue
 import bitmap
@@ -69,7 +68,6 @@ class Job(object):
         self.job_type_for_scheduling = BIG if mean_task_duration > CUTOFF_THIS_EXP  else SMALL
         self.job_type_for_comparison = BIG if mean_task_duration > CUTOFF_BIG_SMALL else SMALL
         
-
         if   task_distribution == TaskDurationDistributions.FROM_FILE: 
             self.file_task_execution_time(job_args)
         elif task_distribution == TaskDurationDistributions.CONSTANT:
@@ -344,7 +342,6 @@ class ClusterStatusKeeper():
 
     #Get shortest wait time node from cache. Update scheduler with placement info.
     def get_worker_with_shortest_wait(self, scheduler_index, current_time, duration):
-        current_time = int(math.ceil(current_time))
         availability_at_cores = self.scheduler_view[scheduler_index]
         if len(availability_at_cores) == 0:
             return 0, current_time
@@ -362,7 +359,6 @@ class ClusterStatusKeeper():
             if self.worker_queues[core_id] < 0:
                 raise AssertionError("check worker queue")
             return self.worker_queues[core_id], False
-        current_time = int(math.ceil(current_time))
         actual_start_at_worker = self.worker_queues[core_id] if self.worker_queues[core_id] > current_time else current_time
         #Update the actual worker's queue.
         self.worker_queues[core_id] = actual_start_at_worker + duration
@@ -815,12 +811,11 @@ class ApplySchedulerUpdates:
     def __init__(self, machines_and_durations, origin_scheduler_index, scheduler_indices, cluster_status_keeper, history_time):
         self.origin_scheduler_index  = origin_scheduler_index
         self.machines_and_durations = machines_and_durations
-        self.history_time = int(math.ceil(history_time))
+        self.history_time = history_time
         self.scheduler_indices = scheduler_indices
         self.status_keeper = cluster_status_keeper
 
     def run(self, current_time):
-        current_time = int(math.ceil(current_time))
         for machine_id, duration in self.machines_and_durations.items():
             for rx_scheduler_id in self.scheduler_indices:
                 self.status_keeper.update_scheduler_view(self.origin_scheduler_index, rx_scheduler_id, machine_id, current_time, self.history_time, duration)
@@ -1028,7 +1023,7 @@ class Simulation(object):
         global num_collisions
         best_fit_for_tasks = defaultdict(tuple)
         for task_index in range(job.num_tasks):
-            duration = int(math.ceil(job.actual_task_duration[task_index]))
+            duration = job.actual_task_duration[task_index]
             chosen_worker, best_scheduler_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time, duration)
             #Update est time at this worker and its cores
             #print("Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_fit_time)
