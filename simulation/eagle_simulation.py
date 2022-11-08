@@ -296,6 +296,7 @@ class ClusterStatusKeeper():
         self.worker_queues = {}
         self.scheduler_view = {}
         self.btmap = bitmap.BitMap(TOTAL_WORKERS)
+        self.scheduler_indices = scheduler_indices
         for i in range(0, TOTAL_WORKERS):
            self.worker_queues[i] = 0
         for i in scheduler_indices:
@@ -365,6 +366,11 @@ class ClusterStatusKeeper():
         has_collision = False if start_time == actual_start_at_worker else True
         return actual_start_at_worker, has_collision
 
+    def print_scheduler_view(self):
+        print("Scheduler view - ",file=finished_file,)
+        for scheduler_index in self.scheduler_indices:
+            print(self.scheduler_view[scheduler_index], file=finished_file,)
+        print("", file=finished_file)
 
 #####################################################################################################################
 #####################################################################################################################
@@ -816,7 +822,9 @@ class ApplySchedulerUpdates:
         self.status_keeper = cluster_status_keeper
 
     def run(self, current_time):
-        for machine_id, duration in self.machines_and_durations.items():
+        for worker_duration in self.machines_and_durations:
+            machine_id = worker_duration[0]
+            duration = worker_duration[1]
             for rx_scheduler_id in self.scheduler_indices:
                 self.status_keeper.update_scheduler_view(self.origin_scheduler_index, rx_scheduler_id, machine_id, current_time, self.history_time, duration)
         return []
@@ -1022,12 +1030,12 @@ class Simulation(object):
     def find_workers_murmuration(self, job, current_time, scheduler_index):
         global num_collisions
         best_fit_for_tasks = defaultdict(tuple)
-        for task_index in range(job.num_tasks):
+        for task_index in reversed(range(job.num_tasks)):
             duration = job.actual_task_duration[task_index]
             chosen_worker, best_scheduler_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time, duration)
             #Update est time at this worker and its cores
-            #print("Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_fit_time)
             best_fit_time, has_collision = self.cluster_status_keeper.update_worker_queues_free_time(chosen_worker, best_scheduler_fit_time, duration, current_time, True)
+            #print("Scheduler", scheduler_index,": Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_scheduler_fit_time, best_fit_time, file=finished_file)
             if has_collision:
                 num_collisions += 1
                 job.has_collision = True
@@ -1072,11 +1080,11 @@ class Simulation(object):
             raise AssertionError('Murmuration received more than one scheduler for the job?')
         # scheduler_index denotes the exactly one scheduler node ID where this job request lands.
         scheduler_index = scheduler_indices[0]
-        workers_durations = defaultdict(int)
+        workers_durations = []
         worker_indices_duration = self.find_workers_murmuration(job, current_time, scheduler_index)
         for task_index, value in worker_indices_duration.items():
             worker_id, duration = value
-            workers_durations[worker_id] = duration
+            workers_durations.append((worker_id, duration))
             task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, BIG, btmap, task_index)))
         task_arrival_events.append((current_time + NETWORK_DELAY, ApplySchedulerUpdates(workers_durations, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time)))
         return task_arrival_events
@@ -1242,8 +1250,8 @@ class Simulation(object):
                 events.append((current_time + 2*NETWORK_DELAY, UpdateRemainingTimeEvent(job)))
 
         if SYSTEM_SIMULATED == "Murmuration":
-            workers_durations = {worker.id: task_duration}
-            events.append((task_completion_time + NETWORK_DELAY, ApplySchedulerUpdates(workers_durations, -1, self.scheduler_indices, self.cluster_status_keeper, current_time)))
+            workers_durations  = tuple([worker.id, task_duration])
+            events.append((task_completion_time + NETWORK_DELAY, ApplySchedulerUpdates([workers_durations], -1, self.scheduler_indices, self.cluster_status_keeper, current_time)))
 
         if len(job.unscheduled_tasks) == 0:
             logging.info("Finished scheduling tasks for job %s" % job.id)
