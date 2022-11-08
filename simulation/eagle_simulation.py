@@ -416,7 +416,7 @@ class TaskEndEvent():
             if(self.worker.in_big):
                 stats.STATS_TASKS_SH_EXEC_IN_BP += 1
 
-        if (SYSTEM_SIMULATED == "Murmuration"):
+        elif (SYSTEM_SIMULATED == "Murmuration"):
             self.status_keeper.update_worker_queues_free_time(self.worker.id, 0, self.task_duration, current_time, False)
         elif (self.SCHEDULE_BIG_CENTRALIZED):
             self.status_keeper.update_workers_queue([self.worker.id], False, self.estimated_task_duration)
@@ -1237,7 +1237,6 @@ class Simulation(object):
         worker.busy_time += task_duration
         task_completion_time = task_duration + get_task_response_time
         print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time)
-        print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " starts at ", current_time, " will finish at time ", task_completion_time, file=finished_file)
         is_job_complete = job.update_task_completion_details(task_completion_time)
 
         if is_job_complete:
