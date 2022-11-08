@@ -849,7 +849,7 @@ class Simulation(object):
 
         while len(self.workers) < TOTAL_WORKERS:
             worker = Worker(self, SLOTS_PER_WORKER, len(self.workers),self.index_last_worker_of_small_partition,self.index_first_worker_of_big_partition)
-            self.workers.append(Worker(self, SLOTS_PER_WORKER, len(self.workers),self.index_last_worker_of_small_partition,self.index_first_worker_of_big_partition))
+            self.workers.append(worker)
             if random.random() < RATIO_SCHEDULERS_TO_WORKERS:
                 self.scheduler_indices.append(worker.id)
 
