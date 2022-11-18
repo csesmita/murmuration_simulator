@@ -89,11 +89,16 @@ class Job(object):
 
         self.probed_workers = set()
         self.remaining_exec_time = self.estimated_task_duration*len(self.unscheduled_tasks)
+        self.tct = 0
+        self.tail_tct = 0
 
     #Job class    """ Returns true if the job has completed, and false otherwise. """
     def update_task_completion_details(self, completion_time):
         self.completed_tasks_count += 1
+        self.tct += completion_time
         self.end_time = max(completion_time, self.end_time)
+        if self.end_time == completion_time:
+            self.tail_tct = completion_time
         assert self.completed_tasks_count <= self.num_tasks
         return self.num_tasks == self.completed_tasks_count
 
@@ -175,7 +180,7 @@ class JobArrival(Event):
             rnd_worker_in_big_partition = random.randint(self.simulation.index_first_worker_of_big_partition, len(self.simulation.workers)-1)
             self.simulation.hash_jobid_to_node[self.job.id]=rnd_worker_in_big_partition
 
-            if SYSTEM_SIMULATED == "Hawk" or SYSTEM_SIMULATED == "Eagle":
+            if SYSTEM_SIMULATED == "Hawk" or SYSTEM_SIMULATED == "Eagle" or SYSTEM_SIMULATED == "SparrowPT":
                 possible_worker_indices = self.simulation.small_partition_workers
             if SYSTEM_SIMULATED == "IdealEagle":
                 possible_worker_indices = self.simulation.get_list_non_long_job_workers_from_btmap(self.simulation.cluster_status_keeper.get_btmap())
@@ -1058,6 +1063,8 @@ class Simulation(object):
             return self.send_probes_hawk(job, current_time, worker_indices, btmap)
         if SYSTEM_SIMULATED == "Murmuration":
             return self.send_tasks_murmuration(job, current_time, worker_indices, btmap)
+        if SYSTEM_SIMULATED == "SparrowPT":
+            return self.send_probes_sparrowpt(job, current_time, worker_indices, btmap)
 
 
     #Simulation class
@@ -1068,6 +1075,22 @@ class Simulation(object):
         for worker_index in worker_indices:
             probe_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_index], job.id, job.estimated_task_duration, job.job_type_for_scheduling, btmap, -1)))
             job.probed_workers.add(worker_index)
+        return probe_events
+
+    #Simulation class
+    def send_probes_sparrowpt(self, job, current_time, worker_indices, btmap):
+        self.jobs[job.id] = job
+
+        probe_events = []
+        assert len(worker_indices) == PROBE_RATIO * job.num_tasks
+        count = 0
+        for task_index in list(range(job.num_tasks)):
+            for pr in list(range(PROBE_RATIO)):
+                worker_index = worker_indices[count]
+                probe_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_index], job.id, job.estimated_task_duration, job.job_type_for_scheduling, btmap, task_index)))
+                #print("Job", job.id, "task", task_index, "probe", pr, "sending to worker", worker_index)
+                count += 1
+                job.probed_workers.add(worker_index)
         return probe_events
 
 
@@ -1225,15 +1248,19 @@ class Simulation(object):
             #Redundant probe.
             return False, [(get_task_response_time, NoopGetTaskResponseEvent(worker))]
 
-        this_task_id=job.completed_tasks_count
-        Job.per_job_task_info[job_id][this_task_id] = current_time
-        events = []
         task_duration = 0
         if task_index > -1:
             task_duration = job.actual_task_duration[task_index]
-            job.unscheduled_tasks.remove(task_duration)
+            if task_duration in  job.unscheduled_tasks:
+                job.unscheduled_tasks.remove(task_duration)
+            else:
+                #Redundant probe.
+                return False, [(get_task_response_time, NoopGetTaskResponseEvent(worker))]
         else:
             task_duration = job.unscheduled_tasks.pop()
+        this_task_id=job.completed_tasks_count
+        Job.per_job_task_info[job_id][this_task_id] = current_time
+        events = []
         worker.busy_time += task_duration
         task_completion_time = task_duration + get_task_response_time
         print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time)
@@ -1241,7 +1268,7 @@ class Simulation(object):
 
         if is_job_complete:
             self.jobs_completed += 1;
-            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " by_def: ",job.job_type_for_comparison, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, file=finished_file)
+            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " by_def: ",job.job_type_for_comparison, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, "average TCT" , job.tct / job.num_tasks, "tail TCT", job.tail_tct, file=finished_file)
 
         events.append((task_completion_time, TaskEndEvent(worker, self.SCHEDULE_BIG_CENTRALIZED, self.cluster_status_keeper, job.id, job.job_type_for_scheduling, job.estimated_task_duration, this_task_id, task_duration)))
         
