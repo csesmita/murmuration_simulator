@@ -1403,7 +1403,7 @@ RATIO_SCHEDULERS_TO_WORKERS     = float(sys.argv[23])
 if RATIO_SCHEDULERS_TO_WORKERS > 1:
     print("Scheduler to Cores ratio cannot exceed 1")
     sys.exit(1)
-UPDATE_DELAY                    = int(sys.argv[24])
+UPDATE_DELAY                    = float(sys.argv[24])
 
 #MIN_NR_PROBES = 20 #1/100*TOTAL_WORKERS
 CAP_SRPT_SBP = 5 #cap on the % of slowdown a job can tolerate for SRPT and SBP
