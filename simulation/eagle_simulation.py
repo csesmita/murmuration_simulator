@@ -1109,7 +1109,7 @@ class Simulation(object):
             worker_id, duration = value
             workers_durations.append((worker_id, duration))
             task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, BIG, btmap, task_index)))
-        task_arrival_events.append((current_time + NETWORK_DELAY, ApplySchedulerUpdates(workers_durations, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time)))
+        task_arrival_events.append((current_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates(workers_durations, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time)))
         return task_arrival_events
 
 
@@ -1277,7 +1277,7 @@ class Simulation(object):
 
         if SYSTEM_SIMULATED == "Murmuration":
             workers_durations  = tuple([worker.id, task_duration])
-            events.append((task_completion_time + NETWORK_DELAY, ApplySchedulerUpdates([workers_durations], -1, self.scheduler_indices, self.cluster_status_keeper, current_time)))
+            events.append((task_completion_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates([workers_durations], -1, self.scheduler_indices, self.cluster_status_keeper, current_time)))
 
         if len(job.unscheduled_tasks) == 0:
             logging.info("Finished scheduling tasks for job %s" % job.id)
