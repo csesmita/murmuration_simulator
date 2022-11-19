@@ -332,6 +332,9 @@ class ClusterStatusKeeper():
     def update_scheduler_view(self, origin_scheduler_index, rx_scheduler_index, core_id,current_time, history_time, duration):
         if origin_scheduler_index == rx_scheduler_index:
             return
+        self.update_local_scheduler_view(rx_scheduler_index, core_id,history_time, duration)
+
+    def update_local_scheduler_view(self,rx_scheduler_index, core_id,history_time, duration):
         availability_at_cores = self.scheduler_view[rx_scheduler_index]
         core_availability = 0
         if core_id in availability_at_cores.keys():
@@ -469,6 +472,7 @@ class Worker(object):
         self.btmap_tstamp = -1
         self.busy_time = 0.0
         self.num_tasks = 0
+        self.scheduler_index = -1
 
     #Worker class
     def add_probe(self, job_id, task_length, job_type_for_scheduling, current_time, btmap, handle_stealing, task_index):
@@ -852,11 +856,15 @@ class Simulation(object):
         self.index_last_worker_of_small_partition = int(SMALL_PARTITION*TOTAL_WORKERS*SLOTS_PER_WORKER/100)-1
         self.index_first_worker_of_big_partition  = int((100-BIG_PARTITION)*TOTAL_WORKERS*SLOTS_PER_WORKER/100)
 
+        count = 0
         while len(self.workers) < TOTAL_WORKERS:
             worker = Worker(self, SLOTS_PER_WORKER, len(self.workers),self.index_last_worker_of_small_partition,self.index_first_worker_of_big_partition)
             self.workers.append(worker)
             if random.random() < RATIO_SCHEDULERS_TO_WORKERS:
                 self.scheduler_indices.append(worker.id)
+                worker.scheduler_index = count
+                count += 1
+
 
         self.worker_indices = range(TOTAL_WORKERS)
         self.off_mean_bottom = off_mean_bottom
@@ -1277,7 +1285,14 @@ class Simulation(object):
 
         if SYSTEM_SIMULATED == "Murmuration":
             workers_durations  = tuple([worker.id, task_duration])
-            events.append((task_completion_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates([workers_durations], -1, self.scheduler_indices, self.cluster_status_keeper, current_time)))
+            if LOCAL_SCHEDULER_UPDATE and worker.scheduler_index > -1:
+                #Apply instant update to this scheduler.
+                self.cluster_status_keeper.update_local_scheduler_view(worker.scheduler_index, worker.id, current_time, task_duration)
+                #Apply delayed updates to all other schedulers.
+                events.append((task_completion_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates([workers_durations], worker.scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time)))
+            else:
+                #Apply delayed updates to all schedulers.
+                events.append((task_completion_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates([workers_durations], -1, self.scheduler_indices, self.cluster_status_keeper, current_time)))
 
         if len(job.unscheduled_tasks) == 0:
             logging.info("Finished scheduling tasks for job %s" % job.id)
@@ -1372,7 +1387,7 @@ SPEEDUP = 1000
 job_start_tstamps = {}
 
 random.seed(123456798)
-if(len(sys.argv) != 25):
+if(len(sys.argv) != 26):
     print("Incorrect number of parameters.")
     sys.exit(1)
 
@@ -1404,6 +1419,7 @@ if RATIO_SCHEDULERS_TO_WORKERS > 1:
     print("Scheduler to Cores ratio cannot exceed 1")
     sys.exit(1)
 UPDATE_DELAY                    = float(sys.argv[24])
+LOCAL_SCHEDULER_UPDATE          = (sys.argv[25] == "yes")
 
 #MIN_NR_PROBES = 20 #1/100*TOTAL_WORKERS
 CAP_SRPT_SBP = 5 #cap on the % of slowdown a job can tolerate for SRPT and SBP
