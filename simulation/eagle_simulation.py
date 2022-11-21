@@ -47,7 +47,7 @@ class Job(object):
         job_args                    = (line.split('\n'))[0].split()
         self.start_time             = float(job_args[0]) / SPEEDUP
         self.num_tasks              = int(job_args[1])
-        mean_task_duration          = int(float(job_args[2]))
+        mean_task_duration          = (float(job_args[2]))
 
         #dephase the incoming job in case it has the exact submission time as another already submitted job
         if self.start_time not in job_start_tstamps:
@@ -106,8 +106,8 @@ class Job(object):
     #Job class
     def file_task_execution_time(self, job_args):
         for task_duration in (job_args[3:]):
-           self.unscheduled_tasks.appendleft(int(float(task_duration)))
-           self.actual_task_duration.appendleft(int(float(task_duration)))
+           self.unscheduled_tasks.appendleft(float(task_duration))
+           self.actual_task_duration.appendleft(float(task_duration))
         assert(len(self.unscheduled_tasks) == self.num_tasks)
 
     #Job class
