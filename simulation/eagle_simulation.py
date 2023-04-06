@@ -49,13 +49,6 @@ class Job(object):
         self.num_tasks              = int(job_args[1])
         mean_task_duration          = (float(job_args[2]))
 
-        #dephase the incoming job in case it has the exact submission time as another already submitted job
-        if self.start_time not in job_start_tstamps:
-            job_start_tstamps[self.start_time] = self.start_time
-        else:
-            job_start_tstamps[self.start_time] += 0.01
-            self.start_time = job_start_tstamps[self.start_time]
-        
         self.id = Job.job_count
         Job.job_count += 1
         self.completed_tasks_count = 0
@@ -325,7 +318,12 @@ class ClusterStatusKeeper():
                 queue -= duration
                 if(queue == 0):
                     self.btmap.flip(worker) 
-            assert queue >= 0, (" offending value for queue: %r %i " % (queue,worker))
+            if queue < 0:
+                print(" offending value for queue: %r %i " % (queue,worker))
+                if abs(queue) < 0.001:
+                    queue =0
+                else:
+                    raise AssertionError(" offending value for queue: %r %i " % (queue,worker))
             self.worker_queues[worker] = queue
 
     #Update rx scheduler with placement info.
