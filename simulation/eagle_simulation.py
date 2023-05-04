@@ -83,15 +83,17 @@ class Job(object):
         self.probed_workers = set()
         self.remaining_exec_time = self.estimated_task_duration*len(self.unscheduled_tasks)
         self.tct = 0
+        self.w2x = 0
         self.tail_tct = 0
 
     #Job class    """ Returns true if the job has completed, and false otherwise. """
-    def update_task_completion_details(self, completion_time):
+    def update_task_completion_details(self, completion_time, task_wait_time):
         self.completed_tasks_count += 1
         self.tct += completion_time
         self.end_time = max(completion_time, self.end_time)
         if self.end_time == completion_time:
             self.tail_tct = completion_time
+        self.w2x += task_wait_time
         assert self.completed_tasks_count <= self.num_tasks
         return self.num_tasks == self.completed_tasks_count
 
@@ -482,7 +484,7 @@ class Worker(object):
     
         if (not long_job and handle_stealing == False and  self.in_big):        
             stats.STATS_SH_PROBES_ASSIGNED_IN_BP +=1
-        self.queued_probes.append([job_id,task_length,(self.executing_big == True or self.queued_big > 0), 0, False,-1, task_index])
+        self.queued_probes.append([job_id,task_length,(self.executing_big == True or self.queued_big > 0), 0, False,-1, task_index, current_time])
 
         if (long_job):
             self.queued_big     = self.queued_big + 1
@@ -640,6 +642,7 @@ class Worker(object):
         job_id = self.queued_probes[pos][0]
         estimated_task_duration = self.queued_probes[pos][1]
         task_index = self.queued_probes[pos][6]
+        queue_start_time = self.queued_probes[pos][7]
 
         self.executing_big = self.simulation.jobs[job_id].job_type_for_scheduling == BIG
         if self.executing_big:
@@ -649,7 +652,7 @@ class Worker(object):
         else:
             self.tstamp_start_crt_big_task = -1
 
-        was_successful, events = self.simulation.get_task(job_id, self, current_time, task_index)
+        was_successful, events = self.simulation.get_task(job_id, self, current_time, task_index, queue_start_time)
         job_bydef_big = (self.simulation.jobs[job_id].job_type_for_comparison == BIG)
        
         if(not job_bydef_big and self.queued_probes[0][5] == 1 and self.in_big and was_successful):
@@ -1245,7 +1248,7 @@ class Simulation(object):
 
 
     #Simulation class
-    def get_task(self, job_id, worker, current_time, task_index):
+    def get_task(self, job_id, worker, current_time, task_index, queue_start_time):
         job = self.jobs[job_id]
         #account for the fact that this is called when the probe is launched but it needs an RTT to talk to the scheduler
         get_task_response_time = current_time + 2 * NETWORK_DELAY
@@ -1269,12 +1272,13 @@ class Simulation(object):
         events = []
         worker.busy_time += task_duration
         task_completion_time = task_duration + get_task_response_time
-        print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time)
-        is_job_complete = job.update_task_completion_details(task_completion_time)
+        task_wait_time = current_time - queue_start_time
+        #print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time)
+        is_job_complete = job.update_task_completion_details(task_completion_time, task_wait_time)
 
         if is_job_complete:
             self.jobs_completed += 1;
-            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " by_def: ",job.job_type_for_comparison, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, "average TCT" , job.tct / job.num_tasks, "tail TCT", job.tail_tct, file=finished_file)
+            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " by_def: ",job.job_type_for_comparison, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, "average TCT" , job.tct / job.num_tasks, "tail TCT", job.tail_tct, "average w2x", job.w2x/ job.num_tasks, file=finished_file)
 
         events.append((task_completion_time, TaskEndEvent(worker, self.SCHEDULE_BIG_CENTRALIZED, self.cluster_status_keeper, job.id, job.job_type_for_scheduling, job.estimated_task_duration, this_task_id, task_duration)))
         
