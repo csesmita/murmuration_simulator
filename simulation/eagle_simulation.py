@@ -336,9 +336,7 @@ class ClusterStatusKeeper():
 
     def update_local_scheduler_view(self,rx_scheduler_index, core_id,history_time, duration):
         availability_at_cores = self.scheduler_view[rx_scheduler_index]
-        core_availability = 0
-        if core_id in availability_at_cores.keys():
-            core_availability = availability_at_cores[core_id]
+        core_availability = availability_at_cores[core_id]
         #Update whatever is received from other schedulers and earlier placements by self.
         #This is the complete truth.
         if history_time > core_availability:
@@ -346,14 +344,11 @@ class ClusterStatusKeeper():
             #This advancement cannot be reversed.
             #All durations get added beyond this hole.
             core_availability = history_time
-        core_availability += duration
-        availability_at_cores[core_id] = core_availability
+        availability_at_cores[core_id] = core_availability + duration
 
     #Get shortest wait time node from cache. Update scheduler with placement info.
     def get_worker_with_shortest_wait(self, scheduler_index, current_time, duration):
         availability_at_cores = self.scheduler_view[scheduler_index]
-        if len(availability_at_cores) == 0:
-            return 0, current_time
         chosen_worker, best_fit_time = (sorted(availability_at_cores.items(), key=itemgetter(1)))[0]
         if best_fit_time < current_time:
             #Fill the hole
@@ -364,7 +359,7 @@ class ClusterStatusKeeper():
     #Update the workers with placement info.
     def update_worker_queues_free_time(self, core_id, start_time, duration, current_time, increment):
         if not increment:
-            self.worker_queues[core_id]  -= duration
+            self.worker_queues[core_id] -= duration
             if self.worker_queues[core_id] < 0:
                 raise AssertionError("check worker queue")
             return self.worker_queues[core_id], False
