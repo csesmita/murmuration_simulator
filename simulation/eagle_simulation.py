@@ -237,7 +237,7 @@ class PeriodicTimerEvent(Event):
     def run(self, current_time):
         new_events = []
 
-        total_load       = str(int(10000*(1-self.simulation.total_free_slots*1.0/(TOTAL_WORKERS*SLOTS_PER_WORKER)))/100.0)
+        total_load       = str(int(10000*(1-self.simulation.total_free_slots*1.0/(self.simulation.total_slots)))/100.0)
         small_load       = str(int(10000*(1-self.simulation.free_slots_small_partition*1.0/len(self.simulation.small_partition_workers)))/100.0)
         big_load         = str(int(10000*(1-self.simulation.free_slots_big_partition*1.0/len(self.simulation.big_partition_workers)))/100.0)
         small_not_big_load ="N/A"
@@ -329,12 +329,12 @@ class ClusterStatusKeeper():
             self.worker_queues[worker] = queue
 
     #Update rx scheduler with placement info.
-    def update_scheduler_view(self, origin_scheduler_index, rx_scheduler_index, core_id,current_time, history_time, duration):
+    def update_scheduler_view(self, origin_scheduler_index, rx_scheduler_index, core_id,current_time, history_time, duration, num_slots):
         if origin_scheduler_index == rx_scheduler_index:
             return
-        self.update_local_scheduler_view(rx_scheduler_index, core_id,history_time, duration)
+        self.update_local_scheduler_view(rx_scheduler_index, core_id, num_slots, history_time, duration)
 
-    def update_local_scheduler_view(self,rx_scheduler_index, core_id,history_time, duration):
+    def update_local_scheduler_view(self,rx_scheduler_index, core_id, num_slots, history_time, duration):
         availability_at_cores = self.scheduler_view[rx_scheduler_index]
         core_availability = availability_at_cores[core_id]
         #Update whatever is received from other schedulers and earlier placements by self.
@@ -344,7 +344,7 @@ class ClusterStatusKeeper():
             #This advancement cannot be reversed.
             #All durations get added beyond this hole.
             core_availability = history_time
-        availability_at_cores[core_id] = core_availability + duration
+        availability_at_cores[core_id] = core_availability + duration/num_slots
 
     #Get shortest wait time node from cache. Update scheduler with placement info.
     def get_worker_with_shortest_wait(self, scheduler_index, current_time, duration):
@@ -353,19 +353,19 @@ class ClusterStatusKeeper():
         if best_fit_time < current_time:
             #Fill the hole
             best_fit_time = current_time
-        availability_at_cores[chosen_worker] = best_fit_time + duration
+        print("Scheduler chooses worker with actual wait",self.worker_queues[chosen_worker],", workers have the following waits - ", "min",self.worker_queues[min(self.worker_queues, key=self.worker_queues.get)], "max", self.worker_queues[max(self.worker_queues, key=self.worker_queues.get)] , file=finished_file,)
         return chosen_worker, best_fit_time
 
     #Update the workers with placement info.
-    def update_worker_queues_free_time(self, core_id, start_time, duration, current_time, increment):
+    def update_worker_queues_free_time(self, core_id, num_slots, start_time, duration, current_time, increment):
         if not increment:
-            self.worker_queues[core_id] -= duration
+            self.worker_queues[core_id] -= duration/num_slots
             if self.worker_queues[core_id] < 0:
                 raise AssertionError("check worker queue")
             return self.worker_queues[core_id], False
         actual_start_at_worker = self.worker_queues[core_id] if self.worker_queues[core_id] > current_time else current_time
         #Update the actual worker's queue.
-        self.worker_queues[core_id] = actual_start_at_worker + duration
+        self.worker_queues[core_id] = actual_start_at_worker + duration/num_slots
         has_collision = False if start_time == actual_start_at_worker else True
         return actual_start_at_worker, has_collision
 
@@ -420,7 +420,7 @@ class TaskEndEvent():
                 stats.STATS_TASKS_SH_EXEC_IN_BP += 1
 
         elif (SYSTEM_SIMULATED == "Murmuration"):
-            self.status_keeper.update_worker_queues_free_time(self.worker.id, 0, self.task_duration, current_time, False)
+            self.status_keeper.update_worker_queues_free_time(self.worker.id, self.worker.num_slots, 0, self.task_duration, current_time, False)
         elif (self.SCHEDULE_BIG_CENTRALIZED):
             self.status_keeper.update_workers_queue([self.worker.id], False, self.estimated_task_duration)
 
@@ -442,6 +442,7 @@ class Worker(object):
         
         self.simulation = simulation
 
+        self.num_slots = num_slots
         # List of times when slots were freed, for each free slot (used to track the time the worker spends idle).
         self.free_slots = []
         while len(self.free_slots) < num_slots:
@@ -830,8 +831,9 @@ class ApplySchedulerUpdates:
         for worker_duration in self.machines_and_durations:
             machine_id = worker_duration[0]
             duration = worker_duration[1]
+            num_slots = worker_duration[2]
             for rx_scheduler_id in self.scheduler_indices:
-                self.status_keeper.update_scheduler_view(self.origin_scheduler_index, rx_scheduler_id, machine_id, current_time, self.history_time, duration)
+                self.status_keeper.update_scheduler_view(self.origin_scheduler_index, rx_scheduler_id, machine_id, current_time, self.history_time, duration, num_slots)
         return []
 
 
@@ -843,24 +845,36 @@ class Simulation(object):
 
         CUTOFF_THIS_EXP = float(small_job_th)
         TOTAL_WORKERS = int(nr_workers)
-        self.total_free_slots = SLOTS_PER_WORKER * TOTAL_WORKERS
         self.jobs = {}
         self.event_queue = PriorityQueue()
         self.workers = []
         self.scheduler_indices = []
 
-        self.index_last_worker_of_small_partition = int(SMALL_PARTITION*TOTAL_WORKERS*SLOTS_PER_WORKER/100)-1
-        self.index_first_worker_of_big_partition  = int((100-BIG_PARTITION)*TOTAL_WORKERS*SLOTS_PER_WORKER/100)
+        self.index_last_worker_of_small_partition = int(SMALL_PARTITION*TOTAL_WORKERS/100)-1
+        self.index_first_worker_of_big_partition  = int((100-BIG_PARTITION)*TOTAL_WORKERS/100)
 
         count = 0
+        self.total_free_slots = 0
+        #Heterogeneity of machines in datacenter.
+        dc_composition = []
+        dc_composition.append([1])
+        dc_composition.append([8, 16, 24, 32])
+        dc_composition.append([8, 8, 16, 16, 24, 32])
+        #dc_composition.append([8, 8, 8, 16, 24, 32])
+        dc_composition.append([8, 8, 8, 8,8,8,8,8,8,32])
+        possible_slots = dc_composition[SLOTS_PER_WORKER]
         while len(self.workers) < TOTAL_WORKERS:
-            worker = Worker(self, SLOTS_PER_WORKER, len(self.workers),self.index_last_worker_of_small_partition,self.index_first_worker_of_big_partition)
+            num_slots_idx = len(self.workers) % len(possible_slots)
+            num_slots = possible_slots[num_slots_idx]
+            worker = Worker(self, num_slots, len(self.workers),self.index_last_worker_of_small_partition,self.index_first_worker_of_big_partition)
             self.workers.append(worker)
+            self.total_free_slots += num_slots
             if random.random() < RATIO_SCHEDULERS_TO_WORKERS:
                 self.scheduler_indices.append(worker.id)
                 worker.scheduler_index = count
                 count += 1
 
+        self.total_slots = self.total_free_slots
 
         self.worker_indices = range(TOTAL_WORKERS)
         self.off_mean_bottom = off_mean_bottom
@@ -1042,8 +1056,9 @@ class Simulation(object):
         for task_index in reversed(range(job.num_tasks)):
             duration = job.actual_task_duration[task_index]
             chosen_worker, best_scheduler_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time, duration)
+            self.cluster_status_keeper.update_local_scheduler_view(scheduler_index, chosen_worker, self.workers[chosen_worker].num_slots, current_time, duration)
             #Update est time at this worker and its cores
-            best_fit_time, has_collision = self.cluster_status_keeper.update_worker_queues_free_time(chosen_worker, best_scheduler_fit_time, duration, current_time, True)
+            best_fit_time, has_collision = self.cluster_status_keeper.update_worker_queues_free_time(chosen_worker, self.workers[chosen_worker].num_slots, best_scheduler_fit_time, duration, current_time, True)
             #print("Scheduler", scheduler_index,": Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_scheduler_fit_time, best_fit_time, file=finished_file)
             if has_collision:
                 num_collisions += 1
@@ -1052,7 +1067,6 @@ class Simulation(object):
             #print("")
             best_fit_for_tasks[task_index] = (chosen_worker, duration)
         return best_fit_for_tasks
-
 
 
     #Simulation class
@@ -1111,7 +1125,7 @@ class Simulation(object):
         worker_indices_duration = self.find_workers_murmuration(job, current_time, scheduler_index)
         for task_index, value in worker_indices_duration.items():
             worker_id, duration = value
-            workers_durations.append((worker_id, duration))
+            workers_durations.append((worker_id, duration, self.workers[worker_id].num_slots))
             task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, BIG, btmap, task_index)))
         task_arrival_events.append((current_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates(workers_durations, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time)))
         return task_arrival_events
@@ -1273,7 +1287,7 @@ class Simulation(object):
 
         if is_job_complete:
             self.jobs_completed += 1;
-            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " by_def: ",job.job_type_for_comparison, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, "average TCT" , job.tct / job.num_tasks, "tail TCT", job.tail_tct, "average w2x", job.w2x/ job.num_tasks, file=finished_file)
+            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " job_id: ",job.id, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, "average TCT" , job.tct / job.num_tasks, "tail TCT", job.tail_tct, "average w2x", job.w2x/ job.num_tasks, file=finished_file)
 
         events.append((task_completion_time, TaskEndEvent(worker, self.SCHEDULE_BIG_CENTRALIZED, self.cluster_status_keeper, job.id, job.job_type_for_scheduling, job.estimated_task_duration, this_task_id, task_duration)))
         
@@ -1281,10 +1295,10 @@ class Simulation(object):
                 events.append((current_time + 2*NETWORK_DELAY, UpdateRemainingTimeEvent(job)))
 
         if SYSTEM_SIMULATED == "Murmuration":
-            workers_durations  = tuple([worker.id, task_duration])
+            workers_durations  = tuple([worker.id, task_duration, worker.num_slots])
             if LOCAL_SCHEDULER_UPDATE and worker.scheduler_index > -1:
                 #Apply instant update to this scheduler.
-                self.cluster_status_keeper.update_local_scheduler_view(worker.scheduler_index, worker.id, current_time, task_duration)
+                self.cluster_status_keeper.update_local_scheduler_view(worker.scheduler_index, worker.id,worker.num_slots, current_time, task_duration)
                 #Apply delayed updates to all other schedulers.
                 events.append((task_completion_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates([workers_durations], worker.scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time)))
             else:
@@ -1359,7 +1373,7 @@ class Simulation(object):
 
         # Calculate utilizations of workers in DC
         time_elapsed_in_dc = current_time - start_time_in_dc
-        utilization = 100 * (float(total_busyness) / float(time_elapsed_in_dc * len(self.workers)))
+        utilization = 100 * (float(total_busyness) / float(time_elapsed_in_dc * self.total_slots))
         print("Total time elapsed in the DC is", time_elapsed_in_dc, "s and utilization is", utilization)
         print("Total time elapsed in the DC is", time_elapsed_in_dc, "s and utilization is", utilization, file=finished_file)
 
@@ -1414,6 +1428,9 @@ SYSTEM_SIMULATED                = sys.argv[22]
 RATIO_SCHEDULERS_TO_WORKERS     = float(sys.argv[23])
 if RATIO_SCHEDULERS_TO_WORKERS > 1:
     print("Scheduler to Cores ratio cannot exceed 1")
+    sys.exit(1)
+if SLOTS_PER_WORKER not in [0,1,2,3]:
+    print("Heterogeneity options are 0,1,2,3.")
     sys.exit(1)
 UPDATE_DELAY                    = float(sys.argv[24])
 LOCAL_SCHEDULER_UPDATE          = (sys.argv[25] == "yes")
