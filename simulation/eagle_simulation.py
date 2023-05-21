@@ -359,11 +359,9 @@ class ClusterStatusKeeper():
         #print("Scheduler chooses worker with actual wait",self.worker_queues[chosen_worker],", workers have the following waits - ", "min",self.worker_queues[min(self.worker_queues, key=self.worker_queues.get)], "max", self.worker_queues[max(self.worker_queues, key=self.worker_queues.get)] , file=finished_file,)
         return chosen_worker, best_fit_time
 
-    def print_scheduler_view(self):
+    def print_scheduler_view(self, scheduler_index):
         print("Scheduler view - ",file=finished_file,)
-        for scheduler_index in self.scheduler_indices:
-            print(self.scheduler_view[scheduler_index], file=finished_file,)
-        print("", file=finished_file)
+        print(self.scheduler_view[scheduler_index], file=finished_file,)
 
 #####################################################################################################################
 #####################################################################################################################
@@ -479,6 +477,12 @@ class Worker(object):
         else:
             return []
 
+    def queue_length(self):
+        queue_length = len(self.queued_probes)
+        if len(self.free_slots) > 0:
+            assert queue_length == 0
+            return -1 * len(self.free_slots)
+        return queue_length
 
 
     #Worker class
@@ -1044,6 +1048,13 @@ class Simulation(object):
         for task_index in reversed(range(job.num_tasks)):
             duration = job.actual_task_duration[task_index]
             chosen_worker, best_scheduler_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time, duration)
+            '''
+            qlens = []
+            for worker in self.workers:
+                qlens.append(worker.queue_length())
+            print("For job", job.id," scheduler chooses worker ", chosen_worker," with actual wait",self.workers[chosen_worker].queue_length(), ", workers have the following waits - ", "min",min(qlens), "max", max(qlens), "raw", qlens, file=finished_file,)
+            self.cluster_status_keeper.print_scheduler_view(scheduler_index)
+            '''
             self.cluster_status_keeper.update_local_scheduler_view(scheduler_index, chosen_worker, self.workers[chosen_worker].num_slots, current_time, duration, True)
             #Update est time at this worker and its cores. Check for collisions by querying the actual probes on the worker.
             #print("Scheduler", scheduler_index,": Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_scheduler_fit_time, best_fit_time, file=finished_file)
@@ -1269,12 +1280,18 @@ class Simulation(object):
         worker.busy_time += task_duration
         task_completion_time = task_duration + get_task_response_time
         task_wait_time = current_time - queue_start_time
-        #print(current_time, " worker:", worker.id, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time)
+        #print(current_time, " worker:", worker.id, " num_slots ", worker.num_slots, " task from job ", job_id, " task duration: ", task_duration, " will finish at time ", task_completion_time, file=finished_file,)
+        '''
+        qlens = []
+        for worker in self.workers:
+            qlens.append(worker.queue_length())
+        print("Worker occupancy", qlens, file=finished_file,)
+        '''
         is_job_complete = job.update_task_completion_details(task_completion_time, task_wait_time)
 
         if is_job_complete:
             self.jobs_completed += 1;
-            print(task_completion_time," estimated_task_duration: ",job.estimated_task_duration, " job_id: ",job.id, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, "average TCT" , job.tct / job.num_tasks, "tail TCT", job.tail_tct, "average w2x", job.w2x/ job.num_tasks, file=finished_file)
+            print(job.end_time," estimated_task_duration: ",job.estimated_task_duration, " job_id: ",job.id, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, "average TCT" , job.tct / job.num_tasks, "tail TCT", job.tail_tct, "average w2x", job.w2x/ job.num_tasks, file=finished_file)
 
         events.append((task_completion_time, TaskEndEvent(worker, self.SCHEDULE_BIG_CENTRALIZED, self.cluster_status_keeper, job.id, job.job_type_for_scheduling, job.estimated_task_duration, this_task_id, task_duration)))
         
