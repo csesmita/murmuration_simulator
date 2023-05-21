@@ -76,7 +76,7 @@ class Job(object):
         elif estimate_distribution == EstimationErrorDistribution.RANDOM:
             top = off_mean_top*mean_task_duration
             bottom = off_mean_bottom*mean_task_duration
-            self.estimated_task_duration = int(random.uniform(bottom,top)) 
+            self.estimated_task_duration = int(random.uniform(bottom,top))
             assert(self.estimated_task_duration <= int(top))
             assert(self.estimated_task_duration >= int(bottom))
 
@@ -356,12 +356,10 @@ class ClusterStatusKeeper():
         if best_fit_time < current_time:
             #Fill the hole
             best_fit_time = current_time
-        #print("Scheduler chooses worker with actual wait",self.worker_queues[chosen_worker],", workers have the following waits - ", "min",self.worker_queues[min(self.worker_queues, key=self.worker_queues.get)], "max", self.worker_queues[max(self.worker_queues, key=self.worker_queues.get)] , file=finished_file,)
         return chosen_worker, best_fit_time
 
     def print_scheduler_view(self, scheduler_index):
-        print("Scheduler view - ",file=finished_file,)
-        print(self.scheduler_view[scheduler_index], file=finished_file,)
+        print("Scheduler view - ",self.scheduler_view[scheduler_index], file=finished_file,)
 
 #####################################################################################################################
 #####################################################################################################################
@@ -1046,24 +1044,18 @@ class Simulation(object):
         global num_collisions
         best_fit_for_tasks = defaultdict(tuple)
         for task_index in reversed(range(job.num_tasks)):
-            duration = job.actual_task_duration[task_index]
-            chosen_worker, best_scheduler_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time, duration)
+            chosen_worker, best_scheduler_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time, job.estimated_task_duration)
             '''
             qlens = []
             for worker in self.workers:
                 qlens.append(worker.queue_length())
             print("For job", job.id," scheduler chooses worker ", chosen_worker," with actual wait",self.workers[chosen_worker].queue_length(), ", workers have the following waits - ", "min",min(qlens), "max", max(qlens), "raw", qlens, file=finished_file,)
+            print("Job", job.id,"---", vars(job))
             self.cluster_status_keeper.print_scheduler_view(scheduler_index)
             '''
-            self.cluster_status_keeper.update_local_scheduler_view(scheduler_index, chosen_worker, self.workers[chosen_worker].num_slots, current_time, duration, True)
-            #Update est time at this worker and its cores. Check for collisions by querying the actual probes on the worker.
+            self.cluster_status_keeper.update_local_scheduler_view(scheduler_index, chosen_worker, self.workers[chosen_worker].num_slots, current_time, job.estimated_task_duration, True)
             #print("Scheduler", scheduler_index,": Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_scheduler_fit_time, best_fit_time, file=finished_file)
-            #if has_collision:
-                #num_collisions += 1
-                #job.has_collision = True
-                #print("adjusted to", best_fit_time)
-            #print("")
-            best_fit_for_tasks[task_index] = (chosen_worker, duration)
+            best_fit_for_tasks[task_index] = (chosen_worker, job.estimated_task_duration)
         return best_fit_for_tasks
 
 
@@ -1122,8 +1114,8 @@ class Simulation(object):
         workers_durations = []
         worker_indices_duration = self.find_workers_murmuration(job, current_time, scheduler_index)
         for task_index, value in worker_indices_duration.items():
-            worker_id, duration = value
-            workers_durations.append((worker_id, duration, self.workers[worker_id].num_slots))
+            worker_id, _ = value
+            workers_durations.append((worker_id, job.estimated_task_duration, self.workers[worker_id].num_slots))
             task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, BIG, btmap, task_index)))
         task_arrival_events.append((current_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates(workers_durations, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time, True)))
         return task_arrival_events
@@ -1344,9 +1336,9 @@ class Simulation(object):
             assert(self.off_mean_bottom == self.off_mean_top)
         elif(self.ESTIMATION == "RANDOM"):
             estimate_distribution = EstimationErrorDistribution.RANDOM
-            assert(self.off_mean_bottom > 0)
-            assert(self.off_mean_top > 0)
-            assert(self.off_mean_top>self.off_mean_bottom)
+            #assert(self.off_mean_bottom > 0)
+            #assert(self.off_mean_top > 0)
+            #assert(self.off_mean_top>self.off_mean_bottom)
 
         if(SYSTEM_SIMULATED == "DLWL"):
             self.shared_cluster_status = self.cluster_status_keeper.get_queue_status()
