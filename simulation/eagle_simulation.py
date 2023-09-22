@@ -39,13 +39,19 @@ class EstimationErrorDistribution:
 class Job(object):
     job_count = 1
     per_job_task_info = {}
+    previous_start = 0.0
 
     def __init__(self, task_distribution, line, estimate_distribution, off_mean_bottom, off_mean_top):
         global job_start_tstamps
         global job_count
 
+        while True:
+            speedup = random.gauss(SPEEDUP, SPEEDUP/2)
+            if speedup > 0:
+                break
         job_args                    = (line.split('\n'))[0].split()
-        self.start_time             = float(job_args[0]) / SPEEDUP
+        self.start_time             = Job.previous_start + 7.0/ speedup
+        Job.previous_start          = self.start_time
         self.num_tasks              = int(job_args[1])
         mean_task_duration          = (float(job_args[2]))
 
@@ -451,7 +457,6 @@ class Worker(object):
         self.btmap_tstamp = -1
         self.busy_time = 0.0
         self.num_tasks = 0
-        self.scheduler_index = -1
 
     #Worker class
     def add_probe(self, job_id, task_length, job_type_for_scheduling, current_time, btmap, handle_stealing, task_index):
@@ -861,7 +866,6 @@ class Simulation(object):
             self.total_free_slots += num_slots
             if random.random() < RATIO_SCHEDULERS_TO_WORKERS:
                 self.scheduler_indices.append(worker.id)
-                worker.scheduler_index = count
                 count += 1
 
         self.total_slots = self.total_free_slots
@@ -1292,11 +1296,11 @@ class Simulation(object):
 
         if SYSTEM_SIMULATED == "Murmuration":
             workers_durations  = tuple([worker.id, task_duration, worker.num_slots])
-            if LOCAL_SCHEDULER_UPDATE and worker.scheduler_index > -1:
+            if LOCAL_SCHEDULER_UPDATE and worker.id in self.scheduler_indices:
                 #Apply instant update to this scheduler.
-                self.cluster_status_keeper.update_local_scheduler_view(worker.scheduler_index, worker.id,worker.num_slots, current_time, task_duration, False)
+                self.cluster_status_keeper.update_local_scheduler_view(worker.id, worker.id, worker.num_slots, current_time, task_duration, False)
                 #Apply delayed updates to all other schedulers.
-                events.append((task_completion_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates([workers_durations], worker.scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time, False)))
+                events.append((task_completion_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates([workers_durations], worker.id, self.scheduler_indices, self.cluster_status_keeper, current_time, False)))
             else:
                 #Apply delayed updates to all schedulers.
                 events.append((task_completion_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates([workers_durations], -1, self.scheduler_indices, self.cluster_status_keeper, current_time, False)))
@@ -1382,6 +1386,7 @@ start_time_in_dc = 0.0
 num_collisions = 0
 job_count = 1
 
+
 finished_file   = open('finished_file', 'w')
 load_file       = open('load_file', 'w')
 stats_file      = open('stats_file', 'w')
@@ -1389,7 +1394,7 @@ stats_file      = open('stats_file', 'w')
 NETWORK_DELAY = 0.0005
 BIG = 1
 SMALL = 0
-SPEEDUP = 1000
+SPEEDUP = 1000.0
 
 job_start_tstamps = {}
 
