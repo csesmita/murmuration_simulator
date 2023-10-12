@@ -39,19 +39,13 @@ class EstimationErrorDistribution:
 class Job(object):
     job_count = 1
     per_job_task_info = {}
-    previous_start = 0.0
 
     def __init__(self, task_distribution, line, estimate_distribution, off_mean_bottom, off_mean_top):
         global job_start_tstamps
         global job_count
 
-        while True:
-            speedup = random.gauss(SPEEDUP, SPEEDUP/2)
-            if speedup > 0:
-                break
         job_args                    = (line.split('\n'))[0].split()
-        self.start_time             = Job.previous_start + 7.0/ speedup
-        Job.previous_start          = self.start_time
+        self.start_time             = float(job_args[0]) / SPEEDUP
         self.num_tasks              = int(job_args[1])
         mean_task_duration          = (float(job_args[2]))
 
@@ -327,7 +321,7 @@ class ClusterStatusKeeper():
                 if(queue == 0):
                     self.btmap.flip(worker) 
             if queue < 0:
-                print(" offending value for queue: %r %i " % (queue,worker))
+                #print(" offending value for queue: %r %i " % (queue,worker))
                 if abs(queue) < 0.001:
                     queue =0
                 else:
@@ -356,16 +350,15 @@ class ClusterStatusKeeper():
             availability_at_cores[core_id] = core_availability - duration/num_slots
 
     #Get shortest wait time node from cache. Update scheduler with placement info.
-    def get_worker_with_shortest_wait(self, scheduler_index, current_time, duration):
+    def get_worker_with_shortest_wait(self, scheduler_index, current_time):
         availability_at_cores = self.scheduler_view[scheduler_index]
-        chosen_worker, best_fit_time = (sorted(availability_at_cores.items(), key=itemgetter(1)))[0]
-        if best_fit_time < current_time:
-            #Fill the hole
-            best_fit_time = current_time
-        return chosen_worker, best_fit_time
+        chosen_worker, _ = (sorted(availability_at_cores.items(), key=itemgetter(1)))[0]
+        #print("Scheduler chooses worker with actual wait",self.worker_queues[chosen_worker],", workers have the following waits - ", "min",self.worker_queues[min(self.worker_queues, key=self.worker_queues.get)], "max", self.worker_queues[max(self.worker_queues, key=self.worker_queues.get)] , file=finished_file,)
+        return chosen_worker
 
     def print_scheduler_view(self, scheduler_index):
-        print("Scheduler view - ",self.scheduler_view[scheduler_index], file=finished_file,)
+        print("Scheduler view - ",file=finished_file,)
+        print(self.scheduler_view[scheduler_index], file=finished_file,)
 
 #####################################################################################################################
 #####################################################################################################################
@@ -1048,18 +1041,10 @@ class Simulation(object):
         global num_collisions
         best_fit_for_tasks = defaultdict(tuple)
         for task_index in reversed(range(job.num_tasks)):
-            chosen_worker, best_scheduler_fit_time = self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time, job.estimated_task_duration)
-            '''
-            qlens = []
-            for worker in self.workers:
-                qlens.append(worker.queue_length())
-            print("For job", job.id," scheduler chooses worker ", chosen_worker," with actual wait",self.workers[chosen_worker].queue_length(), ", workers have the following waits - ", "min",min(qlens), "max", max(qlens), "raw", qlens, file=finished_file,)
-            print("Job", job.id,"---", vars(job))
-            self.cluster_status_keeper.print_scheduler_view(scheduler_index)
-            '''
+            chosen_worker= self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time)
             self.cluster_status_keeper.update_local_scheduler_view(scheduler_index, chosen_worker, self.workers[chosen_worker].num_slots, current_time, job.estimated_task_duration, True)
-            #print("Scheduler", scheduler_index,": Picked worker", chosen_worker," for job", job.id,"task", task_index, "duration", duration,"with best fit scheduler view", best_scheduler_fit_time, best_fit_time, file=finished_file)
-            best_fit_for_tasks[task_index] = (chosen_worker, job.estimated_task_duration)
+            #Update est time at this worker and its cores. Check for collisions by querying the actual probes on the worker.
+            best_fit_for_tasks[task_index] = chosen_worker
         return best_fit_for_tasks
 
 
@@ -1117,8 +1102,7 @@ class Simulation(object):
         scheduler_index = scheduler_indices[0]
         workers_durations = []
         worker_indices_duration = self.find_workers_murmuration(job, current_time, scheduler_index)
-        for task_index, value in worker_indices_duration.items():
-            worker_id, _ = value
+        for task_index, worker_id in worker_indices_duration.items():
             workers_durations.append((worker_id, job.estimated_task_duration, self.workers[worker_id].num_slots))
             task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, BIG, btmap, task_index)))
         task_arrival_events.append((current_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates(workers_durations, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time, True)))
@@ -1295,10 +1279,10 @@ class Simulation(object):
                 events.append((current_time + 2*NETWORK_DELAY, UpdateRemainingTimeEvent(job)))
 
         if SYSTEM_SIMULATED == "Murmuration":
-            workers_durations  = tuple([worker.id, task_duration, worker.num_slots])
+            workers_durations  = tuple([worker.id, job.estimated_task_duration, worker.num_slots])
             if LOCAL_SCHEDULER_UPDATE and worker.id in self.scheduler_indices:
                 #Apply instant update to this scheduler.
-                self.cluster_status_keeper.update_local_scheduler_view(worker.id, worker.id, worker.num_slots, current_time, task_duration, False)
+                self.cluster_status_keeper.update_local_scheduler_view(worker.id, worker.id,worker.num_slots, current_time, job.estimated_task_duration, False)
                 #Apply delayed updates to all other schedulers.
                 events.append((task_completion_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates([workers_durations], worker.id, self.scheduler_indices, self.cluster_status_keeper, current_time, False)))
             else:
@@ -1340,9 +1324,9 @@ class Simulation(object):
             assert(self.off_mean_bottom == self.off_mean_top)
         elif(self.ESTIMATION == "RANDOM"):
             estimate_distribution = EstimationErrorDistribution.RANDOM
-            #assert(self.off_mean_bottom > 0)
-            #assert(self.off_mean_top > 0)
-            #assert(self.off_mean_top>self.off_mean_bottom)
+            assert(self.off_mean_bottom > 0)
+            assert(self.off_mean_top > 0)
+            assert(self.off_mean_top>self.off_mean_bottom)
 
         if(SYSTEM_SIMULATED == "DLWL"):
             self.shared_cluster_status = self.cluster_status_keeper.get_queue_status()
@@ -1386,7 +1370,6 @@ start_time_in_dc = 0.0
 num_collisions = 0
 job_count = 1
 
-
 finished_file   = open('finished_file', 'w')
 load_file       = open('load_file', 'w')
 stats_file      = open('stats_file', 'w')
@@ -1394,7 +1377,7 @@ stats_file      = open('stats_file', 'w')
 NETWORK_DELAY = 0.0005
 BIG = 1
 SMALL = 0
-SPEEDUP = 1000.0
+SPEEDUP = 1000
 
 job_start_tstamps = {}
 
@@ -1412,6 +1395,9 @@ CUTOFF_BIG_SMALL                = float(sys.argv[5])        #
 SMALL_PARTITION                 = float(sys.argv[6])          #from the start of worker_indices
 BIG_PARTITION                   = float(sys.argv[7])          #from the end of worker_indices
 SLOTS_PER_WORKER                = int(sys.argv[8])
+if SLOTS_PER_WORKER not in [0,1,2,3]:
+    print("Heterogeneity options are 0,1,2,3.")
+    sys.exit(1)
 PROBE_RATIO                     = int(sys.argv[9])
 MONITOR_INTERVAL                = int(sys.argv[10])
 ESTIMATION                      = sys.argv[11]              #MEAN, CONSTANT or RANDOM
@@ -1429,9 +1415,6 @@ SYSTEM_SIMULATED                = sys.argv[22]
 RATIO_SCHEDULERS_TO_WORKERS     = float(sys.argv[23])
 if RATIO_SCHEDULERS_TO_WORKERS > 1:
     print("Scheduler to Cores ratio cannot exceed 1")
-    sys.exit(1)
-if SLOTS_PER_WORKER not in [0,1,2,3]:
-    print("Heterogeneity options are 0,1,2,3.")
     sys.exit(1)
 UPDATE_DELAY                    = float(sys.argv[24])
 LOCAL_SCHEDULER_UPDATE          = (sys.argv[25] == "yes")
