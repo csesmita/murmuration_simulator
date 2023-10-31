@@ -30,6 +30,7 @@ import copy
 from collections import deque, defaultdict
 from itertools import count
 from operator import itemgetter
+from datetime import datetime
 
 class TaskDurationDistributions:
     CONSTANT, MEAN, FROM_FILE  = range(3)
@@ -352,7 +353,7 @@ class ClusterStatusKeeper():
     #Get shortest wait time node from cache. Update scheduler with placement info.
     def get_worker_with_shortest_wait(self, scheduler_index, current_time):
         availability_at_cores = self.scheduler_view[scheduler_index]
-        chosen_worker, _ = (sorted(availability_at_cores.items(), key=itemgetter(1)))[0]
+        chosen_worker, _ = sorted(availability_at_cores.items(), key = lambda v:(v[1], random.random()))[0]
         #print("Scheduler chooses worker with actual wait",self.worker_queues[chosen_worker],", workers have the following waits - ", "min",self.worker_queues[min(self.worker_queues, key=self.worker_queues.get)], "max", self.worker_queues[max(self.worker_queues, key=self.worker_queues.get)] , file=finished_file,)
         return chosen_worker
 
@@ -1381,7 +1382,7 @@ SPEEDUP = 1000
 
 job_start_tstamps = {}
 
-random.seed(123456798)
+random.seed(datetime.now().timestamp())
 if(len(sys.argv) != 26):
     print("Incorrect number of parameters.")
     sys.exit(1)
