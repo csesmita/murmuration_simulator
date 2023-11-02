@@ -197,7 +197,28 @@ class JobArrival(Event):
                 self.simulation.cluster_status_keeper.update_workers_queue(worker_indices, True, self.job.estimated_task_duration)
             elif (SYSTEM_SIMULATED == "Murmuration"):
                 #In Murmuration, worker_indices are first populated with a random scheduler index.
-                worker_indices.append(random.choice(self.simulation.scheduler_indices))
+                #Also, we now simulate scheduling as a separate event.
+                #Therefore, return without sending probes here. They will be triggered when either a job is
+                #newly added (NoOpSchedulingEvents) or the scheduler finishes scheduling a job (SchedulingDoneEvents).
+                scheduler_index = random.choice(self.simulation.scheduler_indices)
+                scheduler_object = self.simulation.workers[scheduler_index]
+                scheduler_object.add_job_to_scheduler_queue(current_time, self.job)
+                new_events.append((current_time, NoOpSchedulingEvents(self.simulation, scheduler_index)))
+
+                Job.per_job_task_info[self.job.id] = {}
+                for tasknr in range(0,self.job.num_tasks):
+                    Job.per_job_task_info[self.job.id][tasknr] =- 1
+
+                # Creating a new Job Arrival event for the next job in the trace
+                line = self.jobs_file.readline()
+                if (line == ''):
+                    self.simulation.scheduled_last_job = True
+                    return new_events
+
+                self.job = Job(self.task_distribution, line, self.job.estimate_distribution, self.job.off_mean_bottom, self.job.off_mean_top)
+                new_events.append((self.job.start_time, self))
+                self.simulation.jobs_scheduled += 1
+                return new_events
             elif (self.simulation.SCHEDULE_BIG_CENTRALIZED):
                 workers_queue_status = self.simulation.cluster_status_keeper.get_queue_status()
                 if SYSTEM_SIMULATED == "CLWL" and self.job.job_type_for_comparison == SMALL:
@@ -416,6 +437,30 @@ class TaskEndEvent():
         self.worker.tstamp_start_crt_big_task =- 1
         return self.worker.free_slot(current_time)
 
+#####################################################################################################################
+#####################################################################################################################
+#Poke the scheduler when a new job is added to its queue.
+class NoOpSchedulingEvents(object):
+    def __init__(self, simulation, scheduler_index):
+        self.scheduler_index = scheduler_index
+        self.simulation = simulation
+
+    def run(self, current_time):
+        scheduler_object = self.simulation.workers[self.scheduler_index]
+        return scheduler_object.try_schedule_one(current_time)
+
+#####################################################################################################################
+#####################################################################################################################
+
+class SchedulingDoneEvents(object):
+    def __init__(self, simulation, scheduler_index):
+        self.scheduler_index = scheduler_index
+        self.simulation = simulation
+
+    def run(self, current_time):
+        scheduler_object = self.simulation.workers[self.scheduler_index]
+        scheduler_object.set_scheduler_status(True)
+        return scheduler_object.try_schedule_one(current_time)
 
 #####################################################################################################################
 #####################################################################################################################
@@ -451,6 +496,41 @@ class Worker(object):
         self.btmap_tstamp = -1
         self.busy_time = 0.0
         self.num_tasks = 0
+        self.scheduler_queue = None
+        self.scheduler_ready = None
+
+    def init_scheduler_queue(self):
+        self.scheduler_queue = PriorityQueue()
+        self.scheduler_ready = True
+
+    def add_job_to_scheduler_queue(self, current_time, job):
+        if SCHED_REORDER_TECHNIQUE == "FCFS":
+            self.scheduler_queue.put((current_time, job.id, job))
+        elif SCHED_REORDER_TECHNIQUE == "SJF":
+            self.scheduler_queue.put((job.estimated_task_duration, job.id, job))
+        elif SCHED_REORDER_TECHNIQUE == "SJFwF":
+            self.scheduler_queue.put((job.estimated_task_duration * job.num_tasks, job.id, job))
+
+    def get_next_job_from_scheduler_queue(self):
+        _, _, job = self.scheduler_queue.get()
+        return job
+
+    def get_scheduler_queue_length(self):
+        return self.scheduler_queue.qsize()
+
+    def get_scheduler_status(self):
+        return self.scheduler_ready
+
+    def set_scheduler_status(self, status):
+        self.scheduler_ready = status
+
+
+    def try_schedule_one(self, current_time):
+        if self.get_scheduler_queue_length() > 0 and self.get_scheduler_status():
+            self.set_scheduler_status(False)
+            job = self.get_next_job_from_scheduler_queue()
+            return self.simulation.send_probes(job, current_time, [self.id], None)
+        return []
 
     #Worker class
     def add_probe(self, job_id, task_length, job_type_for_scheduling, current_time, btmap, handle_stealing, task_index):
@@ -842,7 +922,6 @@ class Simulation(object):
         self.index_last_worker_of_small_partition = int(SMALL_PARTITION*TOTAL_WORKERS/100)-1
         self.index_first_worker_of_big_partition  = int((100-BIG_PARTITION)*TOTAL_WORKERS/100)
 
-        count = 0
         self.total_free_slots = 0
         #Heterogeneity of machines in datacenter.
         dc_composition = []
@@ -856,11 +935,11 @@ class Simulation(object):
             num_slots_idx = len(self.workers) % len(possible_slots)
             num_slots = possible_slots[num_slots_idx]
             worker = Worker(self, num_slots, len(self.workers),self.index_last_worker_of_small_partition,self.index_first_worker_of_big_partition)
-            self.workers.append(worker)
             self.total_free_slots += num_slots
             if random.random() < RATIO_SCHEDULERS_TO_WORKERS:
                 self.scheduler_indices.append(worker.id)
-                count += 1
+                worker.init_scheduler_queue()
+            self.workers.append(worker)
 
         self.total_slots = self.total_free_slots
 
@@ -892,6 +971,7 @@ class Simulation(object):
         print("Size of self.small_partition_workers_hash:         ", len(self.small_partition_workers_hash))
         print("Size of self.big_partition_workers_hash:           ", len(self.big_partition_workers_hash))
         print("Size of self.small_not_big_partition_workers_hash: ", len(self.small_not_big_partition_workers_hash))
+        print("Number of schedulers", len(self.scheduler_indices))
 
 
         self.free_slots_small_partition = len(self.small_partition_workers)
@@ -1103,12 +1183,16 @@ class Simulation(object):
         scheduler_index = scheduler_indices[0]
         workers_durations = []
         worker_indices_duration = self.find_workers_murmuration(job, current_time, scheduler_index)
+        #print("Scheduler", scheduler_index,"- Started processing job", job.id,"at", current_time)
+        current_time  += SCHED_PER_JOB_OVERHEAD
         for task_index, worker_id in worker_indices_duration.items():
+            current_time += SCHED_PER_TASK_OVERHEAD
             workers_durations.append((worker_id, job.estimated_task_duration, self.workers[worker_id].num_slots))
             task_arrival_events.append((current_time + NETWORK_DELAY, ProbeEvent(self.workers[worker_id], job.id, job.estimated_task_duration, BIG, btmap, task_index)))
         task_arrival_events.append((current_time + NETWORK_DELAY + UPDATE_DELAY, ApplySchedulerUpdates(workers_durations, scheduler_index, self.scheduler_indices, self.cluster_status_keeper, current_time, True)))
+        task_arrival_events.append((current_time, SchedulingDoneEvents(self, scheduler_index)))
+        #print("Scheduler", scheduler_index,"-Finished processing job", job.id,"at", current_time)
         return task_arrival_events
-
 
 
     #Simulation class
@@ -1382,8 +1466,9 @@ SPEEDUP = 1000
 
 job_start_tstamps = {}
 
-random.seed(datetime.now().timestamp())
-if(len(sys.argv) != 26):
+#random.seed(datetime.now().timestamp())
+random.seed(123456789)
+if(len(sys.argv) != 27):
     print("Incorrect number of parameters.")
     sys.exit(1)
 
@@ -1418,7 +1503,18 @@ if RATIO_SCHEDULERS_TO_WORKERS > 1:
     print("Scheduler to Cores ratio cannot exceed 1")
     sys.exit(1)
 UPDATE_DELAY                    = float(sys.argv[24])
-LOCAL_SCHEDULER_UPDATE          = (sys.argv[25] == "yes")
+LOCAL_SCHEDULER_UPDATE          = sys.argv[25]
+if LOCAL_SCHEDULER_UPDATE not in ["yes", "no"]:
+    print("Local scheduler update should be a yes or a no")
+    sys.exit(1)
+SCHED_REORDER_TECHNIQUE         = sys.argv[26]
+if SCHED_REORDER_TECHNIQUE not in ["FCFS", "SJF", "SJFwF"]:
+    print("Scheduler queue re-ordering options are FCFS, SJF and SJFwF")
+    sys.exit(1)
+
+SCHED_PER_JOB_OVERHEAD = 0.1
+SCHED_PER_TASK_OVERHEAD = 0.005
+
 
 #MIN_NR_PROBES = 20 #1/100*TOTAL_WORKERS
 CAP_SRPT_SBP = 5 #cap on the % of slowdown a job can tolerate for SRPT and SBP
@@ -1429,6 +1525,7 @@ stats = Stats()
 s = Simulation(MONITOR_INTERVAL, stealing, SCHEDULE_BIG_CENTRALIZED, WORKLOAD_FILE,CUTOFF_THIS_EXP,CUTOFF_BIG_SMALL,ESTIMATION,OFF_MEAN_BOTTOM,OFF_MEAN_TOP,TOTAL_WORKERS)
 s.run()
 
+print("Simulation ended in ", (time.time() - t1), " s ", file=finished_file,)
 print("Simulation ended in ", (time.time() - t1), " s ")
 
 finished_file.close()
