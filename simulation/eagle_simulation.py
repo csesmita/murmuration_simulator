@@ -508,7 +508,9 @@ class Worker(object):
             self.scheduler_queue.put((current_time, job.id, job))
         elif SCHED_REORDER_TECHNIQUE == "SJF":
             self.scheduler_queue.put((job.estimated_task_duration, job.id, job))
-        elif SCHED_REORDER_TECHNIQUE == "SJFwF":
+        elif SCHED_REORDER_TECHNIQUE == "LRTF":
+            self.scheduler_queue.put((job.num_tasks, job.id, job))
+        elif SCHED_REORDER_TECHNIQUE == "SRJF":
             self.scheduler_queue.put((job.estimated_task_duration * job.num_tasks, job.id, job))
 
     def get_next_job_from_scheduler_queue(self):
@@ -925,25 +927,27 @@ class Simulation(object):
         self.total_free_slots = 0
         #Heterogeneity of machines in datacenter.
         dc_composition = []
-        dc_composition.append([1])
+        dc_composition.append([8]) # Homogeneous. 280 cores in 35 machines.
         dc_composition.append([8, 16, 24, 32])
         dc_composition.append([8, 8, 16, 16, 24, 32])
-        #dc_composition.append([8, 8, 8, 16, 24, 32])
-        dc_composition.append([8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,16,16,16,16,16,24,32])
+        dc_composition.append([8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,16,16,16,16,16,24,32]) # Heterogeneous. 280 cores in 25 machines.
         possible_slots = dc_composition[SLOTS_PER_WORKER]
         while len(self.workers) < TOTAL_WORKERS:
             num_slots_idx = len(self.workers) % len(possible_slots)
             num_slots = possible_slots[num_slots_idx]
             worker = Worker(self, num_slots, len(self.workers),self.index_last_worker_of_small_partition,self.index_first_worker_of_big_partition)
             self.total_free_slots += num_slots
-            if random.random() < RATIO_SCHEDULERS_TO_WORKERS:
-                self.scheduler_indices.append(worker.id)
-                worker.init_scheduler_queue()
             self.workers.append(worker)
 
         self.total_slots = self.total_free_slots
+        print("Total number of cores over all machines", self.total_slots)
 
         self.worker_indices = range(TOTAL_WORKERS)
+        self.scheduler_indices = random.choices(self.worker_indices, k = NUMBER_OF_SCHEDULERS)
+        print("Scheduler IDs are", self.scheduler_indices)
+        for worker_id in self.scheduler_indices:
+            worker = self.workers[worker_id]
+            worker.init_scheduler_queue()
         self.off_mean_bottom = off_mean_bottom
         self.off_mean_top = off_mean_top
         self.ESTIMATION = ESTIMATION
@@ -1422,7 +1426,7 @@ class Simulation(object):
         start_time_in_dc = (float(line.split()[0])) / SPEEDUP
         self.event_queue.put((start_time_in_dc, next(unique), JobArrival(self, self.task_distribution, new_job, self.jobs_file)))
         self.jobs_scheduled = 1
-        self.event_queue.put((start_time_in_dc, next(unique), PeriodicTimerEvent(self)))
+        #self.event_queue.put((start_time_in_dc, next(unique), PeriodicTimerEvent(self)))
 
         while (not self.event_queue.empty()):
             current_time, num, event = self.event_queue.get()
@@ -1466,8 +1470,8 @@ SPEEDUP = 1000
 
 job_start_tstamps = {}
 
-#random.seed(datetime.now().timestamp())
-random.seed(123456789)
+random.seed(datetime.now().timestamp())
+#random.seed(123456789)
 if(len(sys.argv) != 27):
     print("Incorrect number of parameters.")
     sys.exit(1)
@@ -1498,18 +1502,15 @@ HEARTBEAT_DELAY                 = int(sys.argv[19])
 MIN_NR_PROBES                   = int(sys.argv[20])
 SBP_ENABLED                     = (sys.argv[21] == "yes")
 SYSTEM_SIMULATED                = sys.argv[22]
-RATIO_SCHEDULERS_TO_WORKERS     = float(sys.argv[23])
-if RATIO_SCHEDULERS_TO_WORKERS > 1:
-    print("Scheduler to Cores ratio cannot exceed 1")
-    sys.exit(1)
+NUMBER_OF_SCHEDULERS            = int(sys.argv[23])
 UPDATE_DELAY                    = float(sys.argv[24])
 LOCAL_SCHEDULER_UPDATE          = sys.argv[25]
 if LOCAL_SCHEDULER_UPDATE not in ["yes", "no"]:
     print("Local scheduler update should be a yes or a no")
     sys.exit(1)
 SCHED_REORDER_TECHNIQUE         = sys.argv[26]
-if SCHED_REORDER_TECHNIQUE not in ["FCFS", "SJF", "SJFwF"]:
-    print("Scheduler queue re-ordering options are FCFS, SJF and SJFwF")
+if SCHED_REORDER_TECHNIQUE not in ["FCFS", "SJF", "LRTF", "SRJF"]:
+    print("Scheduler queue re-ordering options are FCFS, SJF, LRTF and SRJF")
     sys.exit(1)
 
 SCHED_PER_JOB_OVERHEAD = 0.1
