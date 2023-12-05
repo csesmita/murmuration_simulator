@@ -927,7 +927,7 @@ class Simulation(object):
         self.total_free_slots = 0
         #Heterogeneity of machines in datacenter.
         dc_composition = []
-        dc_composition.append([8]) # Homogeneous. 280 cores in 35 machines.
+        dc_composition.append([1]) # Homogeneous. 280 cores in 35 machines.
         dc_composition.append([8, 16, 24, 32])
         dc_composition.append([8, 8, 16, 16, 24, 32])
         dc_composition.append([8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,16,16,16,16,16,24,32]) # Heterogeneous. 280 cores in 25 machines.
@@ -1470,8 +1470,8 @@ SPEEDUP = 1000
 
 job_start_tstamps = {}
 
-random.seed(datetime.now().timestamp())
-#random.seed(123456789)
+#random.seed(datetime.now().timestamp())
+random.seed(123456789)
 if(len(sys.argv) != 27):
     print("Incorrect number of parameters.")
     sys.exit(1)
@@ -1504,8 +1504,8 @@ SBP_ENABLED                     = (sys.argv[21] == "yes")
 SYSTEM_SIMULATED                = sys.argv[22]
 NUMBER_OF_SCHEDULERS            = int(sys.argv[23])
 UPDATE_DELAY                    = float(sys.argv[24])
-LOCAL_SCHEDULER_UPDATE          = sys.argv[25]
-if LOCAL_SCHEDULER_UPDATE not in ["yes", "no"]:
+LOCAL_SCHEDULER_UPDATE          = (sys.argv[25] == "yes")
+if sys.argv[25] not in ["yes", "no"]:
     print("Local scheduler update should be a yes or a no")
     sys.exit(1)
 SCHED_REORDER_TECHNIQUE         = sys.argv[26]
