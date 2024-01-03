@@ -1470,8 +1470,8 @@ SPEEDUP = 1000
 
 job_start_tstamps = {}
 
-#random.seed(datetime.now().timestamp())
-random.seed(123456789)
+random.seed(datetime.now().timestamp())
+#random.seed(123456789)
 if(len(sys.argv) != 27):
     print("Incorrect number of parameters.")
     sys.exit(1)
