@@ -55,7 +55,7 @@ class Job(object):
         self.completed_tasks_count = 0
         self.end_time = self.start_time
         self.unscheduled_tasks = deque()
-        self.actual_task_duration = deque()
+        self.actual_task_duration = []
         self.off_mean_bottom = off_mean_bottom
         self.off_mean_top = off_mean_top
 
@@ -103,7 +103,7 @@ class Job(object):
     def file_task_execution_time(self, job_args):
         for task_duration in (job_args[3:]):
            self.unscheduled_tasks.appendleft(float(task_duration))
-           self.actual_task_duration.appendleft(float(task_duration))
+           self.actual_task_duration.append(float(task_duration))
         assert(len(self.unscheduled_tasks) == self.num_tasks)
 
     #Job class
@@ -252,11 +252,15 @@ class PeriodicSchedulerFailureAttempt(Event):
     def run(self, current_time):
         new_events = []
         #With a small probability, fail a scheduler
-        if random.random() < 1:
+        if random.random() < 0.1:
             failed_sched_id = random.choice(self.simulation.scheduler_indices)
             #contact randomly chosen schedulers for their resource cache
             self.simulation.scheduler_indices.remove(failed_sched_id)
-            print("Scheduler", failed_sched_id, "failed")
+            scheduler_object = self.simulation.workers[failed_sched_id]
+            print("Scheduler", failed_sched_id, "failed. It has an idle status of", scheduler_object.get_scheduler_idle_status(), "and a queue length of", scheduler_object.get_scheduler_queue_length(), "and is processing jobs",)
+            while scheduler_object.get_scheduler_queue_length() > 0:
+                job = scheduler_object.get_next_job_from_scheduler_queue()
+                print("Job", job.id,)
             removed = self.simulation.cluster_status_keeper.remove_scheduler(failed_sched_id)
             assert removed
             contact_num_sched = min(2, len(self.simulation.scheduler_indices))
@@ -265,7 +269,7 @@ class PeriodicSchedulerFailureAttempt(Event):
                 print("Scheduler", failed_sched_id,"restarted at time", current_time, "will contact schedulers", contact_sched_ids)
                 for requested in contact_sched_ids:
                     #Randomly add a randomized rtt delay
-                    new_events.append((current_time + SCHEDULER_RESTART_TIME + UPDATE_DELAY + random.uniform(0,CACHE_RESPONSE_TIME_JITTER), SchedulerCacheRequest(failed_sched_id, requested, self.simulation)))
+                    new_events.append((current_time + SCHEDULER_RESTART_TIME + UPDATE_DELAY + random.uniform(0,CACHE_RESPONSE_TIME_JITTER/2), SchedulerCacheRequest(failed_sched_id, requested, self.simulation)))
 
             else:
                 #Proceed since this is the only scheduler
@@ -290,8 +294,9 @@ class SchedulerCacheRequest(Event):
     def run(self, current_time):
         new_events = []
         cache_snapshot = copy.deepcopy(self.simulation.cluster_status_keeper.get_scheduler_view(self.server_sched))
+        print("Scheduler", self.server_sched, "sends its copy at time", current_time)
         #send snapshot to client_sched with a random delay
-        new_events.append((current_time + UPDATE_DELAY, SchedulerCacheResponse(self.client_sched, self.server_sched, cache_snapshot, self.simulation)))
+        new_events.append((current_time + UPDATE_DELAY + random.uniform(0,CACHE_RESPONSE_TIME_JITTER/2), SchedulerCacheResponse(self.client_sched, self.server_sched, cache_snapshot, self.simulation)))
         print("Scheduler", self.server_sched,"sends its copy at time", current_time)
         return new_events
 
@@ -611,7 +616,6 @@ class Worker(object):
 
     def set_scheduler_idle_status(self, status):
         self.scheduler_idle = status
-
 
     def try_schedule_one(self, current_time):
         if self.get_scheduler_queue_length() > 0 and self.get_scheduler_idle_status():
@@ -1026,12 +1030,12 @@ class Simulation(object):
             self.workers.append(worker)
 
         self.total_slots = self.total_free_slots
-        print("Total number of cores over all machines", self.total_slots)
+        #print("Total number of cores over all machines", self.total_slots)
 
         self.worker_indices = range(TOTAL_WORKERS)
         self.scheduler_indices = random.sample(self.worker_indices, NUMBER_OF_SCHEDULERS)
-	self.worker_indices = list(self.worker_indices)
-        print("Worker IDs are", self.worker_indices)
+        self.worker_indices = list(self.worker_indices)
+        #print("Worker IDs are", self.worker_indices)
         print("Scheduler IDs are", self.scheduler_indices)
         for worker_id in self.scheduler_indices:
             worker = self.workers[worker_id]
@@ -1041,8 +1045,8 @@ class Simulation(object):
         self.ESTIMATION = ESTIMATION
         self.shared_cluster_status = {}
 
-        print("self.index_last_worker_of_small_partition:         ", self.index_last_worker_of_small_partition)
-        print("self.index_first_worker_of_big_partition:          ", self.index_first_worker_of_big_partition)
+        #print("self.index_last_worker_of_small_partition:         ", self.index_last_worker_of_small_partition)
+        #print("self.index_first_worker_of_big_partition:          ", self.index_first_worker_of_big_partition)
 
         self.small_partition_workers_hash =  {}
         self.big_partition_workers_hash = {}
@@ -1060,10 +1064,10 @@ class Simulation(object):
         for node in self.small_not_big_partition_workers:
             self.small_not_big_partition_workers_hash[node] = 1
 
-        print("Size of self.small_partition_workers_hash:         ", len(self.small_partition_workers_hash))
-        print("Size of self.big_partition_workers_hash:           ", len(self.big_partition_workers_hash))
-        print("Size of self.small_not_big_partition_workers_hash: ", len(self.small_not_big_partition_workers_hash))
-        print("Number of schedulers", len(self.scheduler_indices))
+        #print("Size of self.small_partition_workers_hash:         ", len(self.small_partition_workers_hash))
+        #print("Size of self.big_partition_workers_hash:           ", len(self.big_partition_workers_hash))
+        #print("Size of self.small_not_big_partition_workers_hash: ", len(self.small_not_big_partition_workers_hash))
+        #print("Number of schedulers", len(self.scheduler_indices))
 
 
         self.free_slots_small_partition = len(self.small_partition_workers)
@@ -1212,11 +1216,13 @@ class Simulation(object):
     #Simulation class
     def find_workers_murmuration(self, job, current_time, scheduler_index):
         global num_collisions
+        #print("Job", job.id,"task durations", job.actual_task_duration, file=finished_file,)
         best_fit_for_tasks = defaultdict(tuple)
         for task_index in reversed(range(job.num_tasks)):
             chosen_worker= self.cluster_status_keeper.get_worker_with_shortest_wait(scheduler_index, current_time)
             if chosen_worker == -1 :
                 #Scheduler does not exist
+                print("Job", job.id, "affected by scheduler",scheduler_index,"failure")
                 return None
             self.cluster_status_keeper.update_local_scheduler_view(scheduler_index, chosen_worker, self.workers[chosen_worker].num_slots, current_time, job.estimated_task_duration, True)
             #Update est time at this worker and its cores. Check for collisions by querying the actual probes on the worker.
@@ -1456,6 +1462,7 @@ class Simulation(object):
         if is_job_complete:
             self.jobs_completed += 1;
             print(job.end_time," estimated_task_duration: ",job.estimated_task_duration, " job_id: ",job.id, " total_job_running_time: ",(job.end_time - job.start_time), "job_start:", job.start_time, "job_end:", job.end_time, "average TCT" , job.tct / job.num_tasks, "tail TCT", job.tail_tct, "average w2x", job.w2x/ job.num_tasks, file=finished_file)
+            #print(job.end_time," job", job.id, "JCT", (job.end_time - job.start_time))
 
         events.append((task_completion_time, TaskEndEvent(worker, self.SCHEDULE_BIG_CENTRALIZED, self.cluster_status_keeper, job.id, job.job_type_for_scheduling, job.estimated_task_duration, this_task_id, task_duration)))
         
@@ -1523,7 +1530,7 @@ class Simulation(object):
         self.jobs_scheduled = 1
         #self.event_queue.put((start_time_in_dc, next(unique), PeriodicTimerEvent(self)))
         if FT_ENABLED:
-            self.event_queue.put((start_time_in_dc, next(unique), PeriodicSchedulerFailureAttempt(self)))
+            self.event_queue.put((start_time_in_dc + SCHEDULER_FAILURE_ATTEMPT_INTERVAL, next(unique), PeriodicSchedulerFailureAttempt(self)))
 
         while (not self.event_queue.empty()):
             current_time, num, event = self.event_queue.get()
@@ -1614,9 +1621,13 @@ FT_ENABLED                      = (sys.argv[27] == "yes")
 SCHED_PER_JOB_OVERHEAD = 0.1
 SCHED_PER_TASK_OVERHEAD = 0.005
 
+#How often should an attempt to fail a random scheduler be made?
 SCHEDULER_FAILURE_ATTEMPT_INTERVAL = 1
-SCHEDULER_RESTART_TIME = 1
-JOB_CHECK_SCHEDULER_AVAILABILITY = 1
+#How much time does it take for a scheduler to restart?
+SCHEDULER_RESTART_TIME = 5
+#If there are no schedulers available, how often must a job check?
+JOB_CHECK_SCHEDULER_AVAILABILITY = 5
+#Maximum jitter in the rtt of a cache request and response
 CACHE_RESPONSE_TIME_JITTER = 3
 
 #MIN_NR_PROBES = 20 #1/100*TOTAL_WORKERS
