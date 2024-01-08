@@ -258,9 +258,10 @@ class PeriodicSchedulerFailureAttempt(Event):
             self.simulation.scheduler_indices.remove(failed_sched_id)
             scheduler_object = self.simulation.workers[failed_sched_id]
             print("Scheduler", failed_sched_id, "failed. It has an idle status of", scheduler_object.get_scheduler_idle_status(), "and a queue length of", scheduler_object.get_scheduler_queue_length(), "and is processing jobs",)
+            #Scheduler has failed. Send jobs to a different scheduler.
             while scheduler_object.get_scheduler_queue_length() > 0:
                 job = scheduler_object.get_next_job_from_scheduler_queue()
-                print("Job", job.id,)
+                new_events.append((current_time, NoOpSchedulingEvents(self.simulation, job)))
             removed = self.simulation.cluster_status_keeper.remove_scheduler(failed_sched_id)
             assert removed
             contact_num_sched = min(2, len(self.simulation.scheduler_indices))
@@ -1286,6 +1287,7 @@ class Simulation(object):
         worker_indices_duration = self.find_workers_murmuration(job, current_time, scheduler_index)
         if worker_indices_duration == None:
             #Scheduler has failed. Send job to a different scheduler.
+            print("Job", job.id,"is affected by scheduler", scheduler_index,"failure",file=finished_file,)
             task_arrival_events.append((current_time, NoOpSchedulingEvents(self, job)))
             return task_arrival_events
         #print("Scheduler", scheduler_index,"- Started processing job", job.id,"at", current_time)
@@ -1574,8 +1576,8 @@ SPEEDUP = 1000
 
 job_start_tstamps = {}
 
-#random.seed(datetime.now().timestamp())
-random.seed(123456789)
+random.seed(datetime.now().timestamp())
+#random.seed(123456789)
 if(len(sys.argv) != 28):
     print("Incorrect number of parameters.")
     sys.exit(1)
