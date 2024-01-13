@@ -251,40 +251,34 @@ class PeriodicSchedulerFailureAttempt(Event):
 
     def run(self, current_time):
         new_events = []
-        #With a small probability, fail a scheduler
-        if random.random() < 0.1:
-            failed_sched_id = random.choice(self.simulation.scheduler_indices)
-            #contact randomly chosen schedulers for their resource cache
-            self.simulation.scheduler_indices.remove(failed_sched_id)
-            scheduler_object = self.simulation.workers[failed_sched_id]
-            print("Scheduler", failed_sched_id, "failed. It has an idle status of", scheduler_object.get_scheduler_idle_status(), "and a queue length of", scheduler_object.get_scheduler_queue_length(), "and is processing jobs",)
-            #Scheduler has failed. Send jobs to a different scheduler.
-            while scheduler_object.get_scheduler_queue_length() > 0:
-                job = scheduler_object.get_next_job_from_scheduler_queue()
-                new_events.append((current_time, NoOpSchedulingEvents(self.simulation, job)))
-            removed = self.simulation.cluster_status_keeper.remove_scheduler(failed_sched_id)
-            assert removed
-            contact_num_sched = min(2, len(self.simulation.scheduler_indices))
-            if contact_num_sched > 0:
-                contact_sched_ids = random.sample(self.simulation.scheduler_indices, contact_num_sched)
-                print("Scheduler", failed_sched_id,"restarted at time", current_time, "will contact schedulers", contact_sched_ids)
-                for requested in contact_sched_ids:
-                    #Randomly add a randomized rtt delay
-                    new_events.append((current_time + SCHEDULER_RESTART_TIME + UPDATE_DELAY + random.uniform(0,CACHE_RESPONSE_TIME_JITTER/2), SchedulerCacheRequest(failed_sched_id, requested, self.simulation)))
+        #Fail a random scheduler
+        failed_sched_id = random.choice(self.simulation.scheduler_indices)
+        #contact randomly chosen schedulers for their resource cache
+        self.simulation.scheduler_indices.remove(failed_sched_id)
+        scheduler_object = self.simulation.workers[failed_sched_id]
+        print(current_time,"Scheduler", failed_sched_id, "failed.")
+        print(current_time,"Scheduler", failed_sched_id, "failed.", file=finished_file,)
+        #Scheduler has failed. 
+        assert scheduler_object.get_scheduler_queue_length() == 0
+        removed = self.simulation.cluster_status_keeper.remove_scheduler(failed_sched_id)
+        assert removed
 
-            else:
-                #Proceed since this is the only scheduler
-                print("Scheduler", failed_sched_id, "will wait to restart")
-                new_events.append((current_time + SCHEDULER_RESTART_TIME, SchedulerCacheResponse(failed_sched_id, failed_sched_id, defaultdict(int), self.simulation)))
+        contact_num_sched = min(2, len(self.simulation.scheduler_indices))
+        if contact_num_sched > 0:
+            contact_sched_ids = random.sample(self.simulation.scheduler_indices, contact_num_sched)
+            print("Scheduler", failed_sched_id,"restarted at time", current_time, "will contact schedulers", contact_sched_ids)
+            print("Scheduler", failed_sched_id,"restarted at time", current_time, "will contact schedulers", contact_sched_ids, file=finished_file,)
+            for requested in contact_sched_ids:
+                new_events.append((current_time + SCHEDULER_RESTART_TIME + NETWORK_DELAY, SchedulerCacheRequest(failed_sched_id, requested, self.simulation)))
+        else:
+            #Proceed since this is the only scheduler
+            print("Scheduler", failed_sched_id, "will wait to restart")
+            new_events.append((current_time + SCHEDULER_RESTART_TIME, SchedulerCacheResponse(failed_sched_id, failed_sched_id, defaultdict(int), self.simulation)))
 
-            #TODO: Timeout on the contacted schedulers and take further action if need be
-
-            #Only 1 scheduler failure in the life of the run.
-            return new_events
-
-        if(not self.simulation.event_queue.empty()):
-            new_events.append((current_time + SCHEDULER_FAILURE_ATTEMPT_INTERVAL,self))
+        #TODO: Timeout on the contacted schedulers and take further action if need be
+        #Only 1 scheduler failure in the life of the run.
         return new_events
+
 
 class SchedulerCacheRequest(Event):
     def __init__(self,client_sched, server_sched, simulation):
@@ -295,10 +289,10 @@ class SchedulerCacheRequest(Event):
     def run(self, current_time):
         new_events = []
         cache_snapshot = copy.deepcopy(self.simulation.cluster_status_keeper.get_scheduler_view(self.server_sched))
-        print("Scheduler", self.server_sched, "sends its copy at time", current_time)
+        print(current_time, "Scheduler", self.server_sched, "sends its copy")
+        print(current_time, "Scheduler", self.server_sched, "sends its copy", file=finished_file,)
         #send snapshot to client_sched with a random delay
-        new_events.append((current_time + UPDATE_DELAY + random.uniform(0,CACHE_RESPONSE_TIME_JITTER/2), SchedulerCacheResponse(self.client_sched, self.server_sched, cache_snapshot, self.simulation)))
-        print("Scheduler", self.server_sched,"sends its copy at time", current_time)
+        new_events.append((current_time + random.uniform(0,CACHE_RESPONSE_TIME_JITTER) + NETWORK_DELAY, SchedulerCacheResponse(self.client_sched, self.server_sched, cache_snapshot, self.simulation)))
         return new_events
 
 class SchedulerCacheResponse(Event):
@@ -313,7 +307,12 @@ class SchedulerCacheResponse(Event):
         if newly_initialized:
             assert (self.client_sched not in self.simulation.scheduler_indices)
             self.simulation.scheduler_indices.append(self.client_sched)
-            print("Scheduler", self.client_sched,"copies from scheduler", self.server_sched)
+            print(current_time, "Scheduler", self.client_sched,"copies from scheduler", self.server_sched)
+            print(current_time, "Scheduler", self.client_sched,"copies from scheduler", self.server_sched, file=finished_file,)
+            print("Queue lengths of schedulers - ")
+            for sched_id in self.simulation.scheduler_indices:
+                scheduler_object = self.simulation.workers[sched_id]
+                print(sched_id,":",scheduler_object.get_scheduler_queue_length()),
         return []
 
 
@@ -538,6 +537,7 @@ class NoOpSchedulingEvents(object):
         scheduler_index = random.choice(self.simulation.scheduler_indices)
         scheduler_object = self.simulation.workers[scheduler_index]
         scheduler_object.add_job_to_scheduler_queue(current_time, self.job)
+        print(current_time,": Job", self.job.id, "assigned to scheduler", scheduler_index, file=finished_file,)
         print(current_time,": Job", self.job.id, "assigned to scheduler", scheduler_index)
         return scheduler_object.try_schedule_one(current_time)
 
@@ -1524,6 +1524,8 @@ class Simulation(object):
         if(SYSTEM_SIMULATED == "DLWL"):
             self.shared_cluster_status = self.cluster_status_keeper.get_queue_status()
             self.event_queue.put((0, next(unique), WorkerHeartbeatEvent(self)))
+        if FT_ENABLED:
+            self.event_queue.put((0, next(unique), PeriodicSchedulerFailureAttempt(self)))
 
         line = self.jobs_file.readline()
         new_job = Job(self.task_distribution, line, estimate_distribution, self.off_mean_bottom, self.off_mean_top)
@@ -1531,8 +1533,6 @@ class Simulation(object):
         self.event_queue.put((start_time_in_dc, next(unique), JobArrival(self, self.task_distribution, new_job, self.jobs_file)))
         self.jobs_scheduled = 1
         #self.event_queue.put((start_time_in_dc, next(unique), PeriodicTimerEvent(self)))
-        if FT_ENABLED:
-            self.event_queue.put((start_time_in_dc + SCHEDULER_FAILURE_ATTEMPT_INTERVAL, next(unique), PeriodicSchedulerFailureAttempt(self)))
 
         while (not self.event_queue.empty()):
             current_time, num, event = self.event_queue.get()
@@ -1623,12 +1623,10 @@ FT_ENABLED                      = (sys.argv[27] == "yes")
 SCHED_PER_JOB_OVERHEAD = 0.1
 SCHED_PER_TASK_OVERHEAD = 0.005
 
-#How often should an attempt to fail a random scheduler be made?
-SCHEDULER_FAILURE_ATTEMPT_INTERVAL = 1
 #How much time does it take for a scheduler to restart?
-SCHEDULER_RESTART_TIME = 5
+SCHEDULER_RESTART_TIME = 10
 #If there are no schedulers available, how often must a job check?
-JOB_CHECK_SCHEDULER_AVAILABILITY = 5
+JOB_CHECK_SCHEDULER_AVAILABILITY = 1
 #Maximum jitter in the rtt of a cache request and response
 CACHE_RESPONSE_TIME_JITTER = 3
 
