@@ -1189,7 +1189,7 @@ class Simulation(object):
                 estimated_crt_task = worker_obj.estruntime_crt_task
                 adjusted_waiting_time = max(2*NETWORK_DELAY + qlen - min(executed_so_far,estimated_crt_task),0)
 
-            rand_dlwl = random.randint(0, HEARTBEAT_DELAY)
+            rand_dlwl = random.uniform(0, HEARTBEAT_DELAY)
             adjusted_waiting_time += rand_dlwl
             prio_queue.put((adjusted_waiting_time,index))
 
@@ -1604,7 +1604,7 @@ STEALING_LIMIT                  = int(sys.argv[15])         #cap on the nr of ta
 STEALING_ATTEMPTS               = int(sys.argv[16])         #cap on the nr of nodes to contact for stealing
 TOTAL_WORKERS                   = int(sys.argv[17])
 SRPT_ENABLED                    = (sys.argv[18] == "yes")
-HEARTBEAT_DELAY                 = int(sys.argv[19])
+HEARTBEAT_DELAY                 = float(sys.argv[19]) / SPEEDUP
 MIN_NR_PROBES                   = int(sys.argv[20])
 SBP_ENABLED                     = (sys.argv[21] == "yes")
 SYSTEM_SIMULATED                = sys.argv[22]
